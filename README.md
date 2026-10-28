@@ -54,7 +54,7 @@ edgemesh host --model hf:meta-llama/Llama-3.2-1B-Instruct --hf-token hf_...   # 
 edgemesh host --model ./my-local-hf-folder
 ```
 
-Supported architectures: **Llama 2/3.x, Mistral, Qwen2/2.5/3, Phi-3, SmolLM, TinyLlama, Granite,
+Supported architectures: **Llama 2/3.x, Mistral, Qwen2/2.5/3, Phi-3, SmolLM/SmolLM2, TinyLlama,
 GPT-2**, and any fine-tune of them (instruct, roleplay, "uncensored"/abliterated, merges). The repo
 needs `.safetensors` weights and a `tokenizer.json`; GGUF-only repos aren't supported yet. Only the
 hub downloads (with resume); it memory-maps the files and sends each device just its layers as

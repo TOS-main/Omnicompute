@@ -23,7 +23,7 @@ import numpy as np
 log = logging.getLogger("edgemesh.hf")
 
 HF = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
-LLAMA_LIKE = {"llama", "mistral", "qwen2", "qwen3", "phi3", "smollm3", "granite"}
+LLAMA_LIKE = {"llama", "mistral", "qwen2", "qwen3", "phi3"}  # SmolLM/SmolLM2, TinyLlama use "llama"
 SUPPORTED = sorted(LLAMA_LIKE | {"gpt2"})
 META_FILES = ["config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json",
               "special_tokens_map.json"]
