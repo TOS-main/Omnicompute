@@ -43,9 +43,26 @@ edgemesh run "<link>" "Once upon a time" --max-new 50
 Either run the hub on a small cloud VM (open TCP+UDP port 8000), or forward TCP+UDP 8000 on the
 router of the machine that runs it, then share `http://<public-ip>:8000/?k=<key>`.
 
-**Real model (GPT-2):** `edgemesh convert-gpt2 models/gpt2` downloads GPT-2 from Hugging Face and
-converts it (no torch needed), then `edgemesh host --model models/gpt2/gpt2.emm`. Also works with
-`--variant gpt2-medium`, `gpt2-large`, `gpt2-xl`, `distilgpt2`.
+## Models
+
+Load any supported model straight from Hugging Face, either from the **Model** box on the hub's web
+page (paste a repo id or link) or on the command line:
+
+```
+edgemesh host --model Qwen/Qwen2.5-0.5B-Instruct
+edgemesh host --model hf:meta-llama/Llama-3.2-1B-Instruct --hf-token hf_...   # gated models
+edgemesh host --model ./my-local-hf-folder
+```
+
+Supported architectures: **Llama 2/3.x, Mistral, Qwen2/2.5/3, Phi-3, SmolLM, TinyLlama, Granite,
+GPT-2**, and any fine-tune of them (instruct, roleplay, "uncensored"/abliterated, merges). The repo
+needs `.safetensors` weights and a `tokenizer.json`; GGUF-only repos aren't supported yet. Only the
+hub downloads (with resume); it memory-maps the files and sends each device just its layers as
+float16. The model's own chat template is applied when "Chat format" is on. `edgemesh pull <repo>`
+downloads ahead of time.
+
+Rough sizes at float16: 0.5B params ≈ 1 GB, 1.5B ≈ 3 GB, 3B ≈ 6 GB, 7-8B ≈ 15 GB, spread across
+the devices. Browser workers need twice their share (they compute in float32).
 
 ## How it works
 
@@ -98,7 +115,8 @@ it yourself; treat the link like a password.
 ```
 pip install -e ".[test]"
 pytest                       # model split == single device, relay + direct paths, device dropout,
-                             # browser workers in Chromium, JS math == numpy, GPT-2 conversion
+                             # browser workers in Chromium, JS math == numpy, every architecture
+                             # checked against Hugging Face transformers, load-from-HF end to end
 sudo scripts/nat_sim.sh      # three simulated networks: two home NATs + a symmetric "cellular" NAT
 ```
 
@@ -113,8 +131,9 @@ scripts/build_app.py`; CI builds Windows, macOS and Linux versions on every push
 
 - Browser workers compute in plain JavaScript and always use the relay. Next: WebGPU kernels and
   WebRTC data channels so phones can connect peer to peer too.
-- fp32 weights only; GPT-2 family only. Next: int8/fp16 weights and Llama-style models (RoPE,
-  RMSNorm, GQA), which also shrinks what phones must download.
+- float16 weights. Next: int8/int4 quantization (4x smaller downloads for phones) and GGUF import.
+- Gemma, Mixtral/MoE and long-context RoPE variants (longrope, yarn) aren't supported yet.
+- Workers get their layers from the hub; next they could fetch them from Hugging Face directly.
 - One generation at a time, one hub. Next: request batching, several models, hub failover.
 - IPv4 only for hole punching; add IPv6 candidates (many cellular networks hand out public IPv6,
   which needs no punching at all).

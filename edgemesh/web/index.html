@@ -35,11 +35,36 @@
   </section>
 
   <section class="card">
+    <h2>Model</h2>
+    <p id="modelinfo" class="muted">…</p>
+    <form id="hfform">
+      <label class="block">Load any model from Hugging Face (repo id or link)</label>
+      <div class="row">
+        <input id="hfrepo" placeholder="e.g. Qwen/Qwen2.5-0.5B-Instruct" autocomplete="off" spellcheck="false">
+        <button id="hfload">Load</button>
+      </div>
+      <div class="chips">
+        <button type="button" class="chip" data-repo="HuggingFaceTB/SmolLM2-360M-Instruct">SmolLM2 360M</button>
+        <button type="button" class="chip" data-repo="Qwen/Qwen2.5-0.5B-Instruct">Qwen2.5 0.5B</button>
+        <button type="button" class="chip" data-repo="TinyLlama/TinyLlama-1.1B-Chat-v1.0">TinyLlama 1.1B</button>
+        <button type="button" class="chip" data-repo="Qwen/Qwen2.5-1.5B-Instruct">Qwen2.5 1.5B</button>
+      </div>
+      <details>
+        <summary>Gated or private model?</summary>
+        <input id="hftoken" type="password" placeholder="Hugging Face token (hf_…)" autocomplete="off">
+      </details>
+    </form>
+    <div id="dl" hidden><div class="bar"><div id="dlbar"></div></div><p id="dltext" class="muted"></p></div>
+    <p class="hint">Works with Llama, Mistral, Qwen, Phi-3, SmolLM, TinyLlama and GPT-2 models and their fine-tunes, as long as the repo has .safetensors files. Only the hub downloads; each device gets just its layers.</p>
+  </section>
+
+  <section class="card">
     <h2>Run a prompt</h2>
     <textarea id="prompt" rows="3" placeholder="Type a prompt...">The meaning of life is</textarea>
     <div class="row">
       <label>Tokens <input id="maxnew" type="number" value="40" min="1" max="1000"></label>
       <label>Temperature <input id="temp" type="number" value="0.7" min="0" max="2" step="0.1"></label>
+      <label><input id="chat" type="checkbox"> Chat format</label>
       <button id="run" class="primary">Run</button>
     </div>
     <pre id="output"></pre>

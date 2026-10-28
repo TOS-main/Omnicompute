@@ -1,4 +1,4 @@
-"""Runs a generation across the mesh. Lives on the hub, next to the model file.
+"""Runs a generation across the mesh. Lives on the hub, next to the model.
 
 For each token it sends one message into a chain of devices
 (hub -> A -> B -> C -> hub); devices pass activations to each other directly
@@ -16,7 +16,7 @@ import time
 
 import numpy as np
 
-from .model import load_model, plan_layers, shard_tensors
+from .model import plan_layers, shard_tensors
 from .protocol import decode_tensors, encode_tensors
 from .tokenizer import load_tokenizer
 
@@ -27,19 +27,25 @@ MAX_REPLANS = 3
 
 
 class Orchestrator:
-    def __init__(self, endpoint, model_path: str, list_workers):
-        """endpoint: a Messenger whose handler we own. list_workers: () -> [{"node_id", "info"}]."""
+    def __init__(self, endpoint, source, list_workers):
+        """endpoint: a Messenger whose handler we own. source: DictSource or HFSource.
+        list_workers: () -> [{"node_id", "info"}]."""
         self.endpoint = endpoint
         endpoint.handler = self.handle
         self.list_workers = list_workers
-        self.cfg, self.weights = load_model(model_path)
-        self.model_id = f"{self.cfg.get('name', 'model')}-{os.urandom(3).hex()}"
-        self.tokenizer = load_tokenizer(self.cfg, os.path.dirname(os.path.abspath(model_path)))
-        self.plan: list[tuple[str, int, int]] = []
-        self.loaded: dict[str, tuple[int, int]] = {}
+        self.set_model(source)
         self._waiters: dict[str, asyncio.Future] = {}
         self._routes: dict[str, set[str]] = {}  # req -> devices the in-flight step depends on
         self._lock = asyncio.Lock()  # one generation at a time in this MVP
+
+    def set_model(self, source) -> None:
+        """Switch models; devices receive the new layers on the next generation."""
+        self.source, self.cfg = source, source.cfg
+        self.model_id = f"{self.cfg.get('name', 'model')}-{os.urandom(3).hex()}"
+        self.tokenizer = load_tokenizer(source)
+        self.half = getattr(source, "dtype", np.float32) == np.float16
+        self.plan: list[tuple[str, int, int]] = []
+        self.loaded: dict[str, tuple[int, int]] = {}
 
     async def handle(self, peer_id: str, header: dict, payload: bytes):
         fut = self._waiters.get(header.get("req"))
@@ -61,7 +67,9 @@ class Orchestrator:
     async def ensure_plan(self, exclude: set[str] = frozenset()) -> list[tuple[str, int, int]]:
         workers = [{"node_id": w["node_id"], **w["info"]} for w in self.list_workers()
                    if w["info"].get("role") == "worker" and w["node_id"] not in exclude]
-        plan = plan_layers(self.cfg["n_layer"], workers, self.cfg)
+        for w in workers:  # browsers expand float16 weights to float32 in memory
+            w["weight_factor"] = 2 if self.half and w.get("kind") == "browser" else 1
+        plan = plan_layers(self.cfg["n_layer"], workers, self.cfg, 2 if self.half else 4)
         loads = []
         for node, s, e in plan:
             if self.loaded.get(node) != (s, e):
@@ -75,7 +83,10 @@ class Orchestrator:
 
     async def _load(self, node: str, s: int, e: int) -> None:
         t0 = time.monotonic()
-        blob = encode_tensors(shard_tensors(self.cfg, self.weights, s, e))
+        source, model_id = self.source, self.model_id
+        blob = await asyncio.to_thread(lambda: encode_tensors(shard_tensors(source, s, e)))
+        if model_id != self.model_id:
+            raise RuntimeError("model changed while loading")
         await self.endpoint.request(node, {"op": "load", "model": self.model_id, "cfg": self.cfg,
                                            "start": s, "end": e}, blob, timeout=600)
         self.loaded[node] = (s, e)
@@ -100,11 +111,12 @@ class Orchestrator:
             self._waiters.pop(req, None)
             self._routes.pop(req, None)
 
-    async def generate(self, prompt: str, max_new: int = 32, temperature: float = 0.0, seed: int | None = None):
+    async def generate(self, prompt: str, max_new: int = 32, temperature: float = 0.0, seed: int | None = None,
+                       chat: bool = False):
         """Async generator yielding events: {"plan"}, {"token", "text"}, {"replan"}, {"done", "stats"}."""
         async with self._lock:
             rng = np.random.default_rng(seed)
-            ids = self.tokenizer.encode(prompt)[-(self.cfg["n_ctx"] - 1):] or [0]
+            ids = self.tokenizer.encode(prompt, chat=chat)[-(self.cfg["n_ctx"] - 1):] or [0]
             exclude: set[str] = set()
             await self.ensure_plan()
             yield {"type": "plan", "plan": [list(p) for p in self.plan]}
@@ -131,6 +143,8 @@ class Orchestrator:
                 if self.cfg.get("tokenizer") == "bytes":  # random demo model: keep output readable ASCII
                     logits = np.where(_PRINTABLE[: len(logits)], logits, -1e9)
                 nxt = _sample(logits, temperature, rng)
+                if nxt in self.tokenizer.eos_ids:
+                    break
                 out_ids.append(nxt)
                 pending = [nxt]
                 yield {"type": "token", "id": nxt, "text": self.tokenizer.decode(out_ids)}

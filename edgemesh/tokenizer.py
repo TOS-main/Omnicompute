@@ -1,82 +1,85 @@
-"""Tokenizers: raw bytes (for random test models) and GPT-2 byte-level BPE."""
+"""Tokenizers: raw bytes (random demo models) and Hugging Face tokenizer.json files.
+
+Only the hub tokenizes, so only the hub needs the `tokenizers` package (and
+`jinja2` to apply a model's chat template).
+"""
 
 from __future__ import annotations
 
 import json
-import os
-import re
+from datetime import datetime
+from pathlib import Path
 
 
 class ByteTokenizer:
-    def encode(self, text: str) -> list[int]:
+    eos_ids: set[int] = set()
+    has_chat_template = False
+
+    def encode(self, text: str, chat: bool = False) -> list[int]:
         return list(text.encode("utf-8"))
 
     def decode(self, ids: list[int]) -> str:
         return bytes(i % 256 for i in ids).decode("utf-8", errors="replace")
 
 
-def _bytes_to_unicode() -> dict[int, str]:
-    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
-    cs = bs[:]
-    n = 0
-    for b in range(256):
-        if b not in bs:
-            bs.append(b)
-            cs.append(256 + n)
-            n += 1
-    return dict(zip(bs, map(chr, cs)))
+def _token_str(t):
+    return t.get("content") if isinstance(t, dict) else t
 
 
-class GPT2Tokenizer:
-    # Same splitting as GPT-2's, using \w classes instead of \p{L}/\p{N} so only the stdlib is needed.
-    PAT = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?[^\W\d_]+| ?\d+| ?[^\s\w]+|\s+(?!\S)|\s+""")
+class HFTokenizer:
+    def __init__(self, folder: str | Path, hf_config: dict | None = None):
+        from tokenizers import Tokenizer
 
-    def __init__(self, vocab_path: str, merges_path: str):
-        with open(vocab_path, encoding="utf-8") as f:
-            self.encoder = json.load(f)
-        self.decoder = {v: k for k, v in self.encoder.items()}
-        with open(merges_path, encoding="utf-8") as f:
-            merges = [tuple(line.split()) for line in f.read().split("\n")[1:] if line.strip()]
-        self.ranks = {m: i for i, m in enumerate(merges)}
-        self.b2u = _bytes_to_unicode()
-        self.u2b = {v: k for k, v in self.b2u.items()}
-        self.cache: dict[str, list[str]] = {}
+        folder = Path(folder)
+        self.tok = Tokenizer.from_file(str(folder / "tokenizer.json"))
+        tc = _read(folder / "tokenizer_config.json")
+        gen = _read(folder / "generation_config.json")
+        self.bos = _token_str(tc.get("bos_token")) or ""
+        self.eos = _token_str(tc.get("eos_token")) or ""
+        self.template = tc.get("chat_template")
+        if isinstance(self.template, list):  # some repos ship several named templates
+            self.template = next((t["template"] for t in self.template if t.get("name") == "default"),
+                                 self.template[0]["template"])
+        ids = set()
+        for src in (gen.get("eos_token_id"), (hf_config or {}).get("eos_token_id")):
+            ids.update(src if isinstance(src, list) else [src] if src is not None else [])
+        if self.eos and self.tok.token_to_id(self.eos) is not None:
+            ids.add(self.tok.token_to_id(self.eos))
+        self.eos_ids = ids
+        self.has_chat_template = bool(self.template)
 
-    def _bpe(self, token: str) -> list[str]:
-        if token in self.cache:
-            return self.cache[token]
-        word = list(token)
-        while len(word) > 1:
-            pairs = [(self.ranks.get((a, b), 1 << 30), i) for i, (a, b) in enumerate(zip(word, word[1:]))]
-            rank, i = min(pairs)
-            if rank == 1 << 30:
-                break
-            first, second = word[i], word[i + 1]
-            merged, j = [], 0
-            while j < len(word):
-                if j < len(word) - 1 and word[j] == first and word[j + 1] == second:
-                    merged.append(first + second)
-                    j += 2
-                else:
-                    merged.append(word[j])
-                    j += 1
-            word = merged
-        self.cache[token] = word
-        return word
+    def apply_chat_template(self, messages: list[dict]) -> str:
+        import jinja2
 
-    def encode(self, text: str) -> list[int]:
-        ids = []
-        for tok in self.PAT.findall(text):
-            u = "".join(self.b2u[b] for b in tok.encode("utf-8"))
-            ids.extend(self.encoder[p] for p in self._bpe(u))
-        return ids
+        env = jinja2.Environment(trim_blocks=True, lstrip_blocks=True)
+
+        def raise_exception(msg):
+            raise jinja2.TemplateError(msg)
+
+        env.globals.update(raise_exception=raise_exception,
+                           strftime_now=lambda fmt: datetime.now().strftime(fmt))
+        env.filters["tojson"] = lambda v, indent=None, **_: json.dumps(v, indent=indent, ensure_ascii=False)
+        return env.from_string(self.template).render(messages=messages, add_generation_prompt=True,
+                                                     bos_token=self.bos, eos_token=self.eos)
+
+    def encode(self, text: str, chat: bool = False) -> list[int]:
+        if chat and self.template:
+            return self.tok.encode(self.apply_chat_template([{"role": "user", "content": text}]),
+                                   add_special_tokens=False).ids
+        return self.tok.encode(text).ids
 
     def decode(self, ids: list[int]) -> str:
-        text = "".join(self.decoder.get(i, "") for i in ids)
-        return bytes(self.u2b[c] for c in text).decode("utf-8", errors="replace")
+        return self.tok.decode(ids, skip_special_tokens=True)
 
 
-def load_tokenizer(cfg: dict, model_dir: str):
-    if cfg.get("tokenizer") == "gpt2":
-        return GPT2Tokenizer(os.path.join(model_dir, cfg["vocab_file"]), os.path.join(model_dir, cfg["merges_file"]))
+def _read(p: Path) -> dict:
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def load_tokenizer(source):
+    if source.cfg.get("tokenizer") == "hf":
+        return HFTokenizer(source.folder, getattr(source, "hf_config", None))
     return ByteTokenizer()

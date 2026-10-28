@@ -19,6 +19,7 @@ import json
 import logging
 import os
 from importlib import resources
+from pathlib import Path
 
 from aiohttp import WSMsgType, web
 from cryptography.exceptions import InvalidTag
@@ -79,14 +80,19 @@ class HubEndpoint(Messenger):
 
 
 class Hub:
-    def __init__(self, secret: str, host: str = "0.0.0.0", port: int = 8000, model_path: str | None = None):
+    def __init__(self, secret: str, host: str = "0.0.0.0", port: int = 8000, model=None,
+                 models_dir: str | None = None, hf_token: str | None = None):
+        """model: a DictSource/HFSource, a path to a .emm file, or None (no model yet)."""
         self.secret = secret
         self.cipher = MeshCipher(secret)
         self.host, self.port = host, port
         self.clients: dict[str, _Client] = {}
         self.endpoint = HubEndpoint(self)
         self.orchestrator = None
-        self.model_path = model_path
+        self.model = model
+        from .hf import Loader
+
+        self.loader = Loader(Path(models_dir or Path.home() / ".edgemesh" / "models"), hf_token)
         self.lan_origin: str | None = None  # shown on the web page when it is opened via localhost
         self._runner = None
         self._udp = None
@@ -94,16 +100,23 @@ class Hub:
     # ---------- lifecycle ----------
 
     async def start(self) -> None:
-        if self.model_path:
+        if self.model is not None:
             from .orchestrator import Orchestrator
 
-            self.orchestrator = Orchestrator(self.endpoint, self.model_path, self.workers)
+            source = self.model
+            if isinstance(source, str):
+                from .model import DictSource, load_model
+
+                source = DictSource(*load_model(source))
+            self.orchestrator = Orchestrator(self.endpoint, source, self.workers)
         app = web.Application(client_max_size=1 << 30)
         app.add_routes([
             web.get("/", self._index),
             web.get("/ws", self._ws),
             web.get("/api/status", self._status),
             web.post("/api/generate", self._generate),
+            web.get("/api/model", self._model_status),
+            web.post("/api/model", self._load_model),
             web.get("/static/{name}", self._static),
         ])
         self._runner = web.AppRunner(app, access_log=None)
@@ -257,13 +270,56 @@ class Hub:
         await resp.prepare(request)
         try:
             async for ev in self.orchestrator.generate(str(body.get("prompt", "")), int(body.get("max_new", 32)),
-                                                       float(body.get("temperature", 0.0)), body.get("seed")):
+                                                       float(body.get("temperature", 0.0)), body.get("seed"),
+                                                       bool(body.get("chat", False))):
                 await resp.write((json.dumps(ev) + "\n").encode())
         except Exception as e:
             log.warning("generation failed: %s", e)
             await resp.write((json.dumps({"type": "error", "error": str(e)}) + "\n").encode())
         await resp.write_eof()
         return resp
+
+
+    async def _model_status(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        o = self.orchestrator
+        d = self.loader.current
+        return web.json_response({
+            "model": o.cfg if o else None,
+            "chat_template": bool(o and o.tokenizer.has_chat_template),
+            "download": d.as_dict() if d else None,
+        })
+
+    async def _load_model(self, request: web.Request) -> web.Response:
+        """POST {"repo": "org/name", "token": optional HF token} -> starts download + switch."""
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        body = await request.json()
+        repo = str(body.get("repo", "")).strip().removeprefix("https://huggingface.co/").strip("/")
+        if repo.count("/") != 1:
+            raise web.HTTPBadRequest(text="use the Hugging Face repo id, like Qwen/Qwen2.5-0.5B-Instruct")
+        loop = asyncio.get_running_loop()
+
+        def ready(source):
+            done = asyncio.run_coroutine_threadsafe(self._switch(source), loop)
+            done.result(timeout=600)
+
+        try:
+            d = self.loader.start(repo, body.get("token") or None, ready)
+        except RuntimeError as e:
+            raise web.HTTPConflict(text=str(e))
+        return web.json_response(d.as_dict())
+
+    async def _switch(self, source) -> None:
+        from .orchestrator import Orchestrator
+
+        if self.orchestrator is None:
+            self.orchestrator = Orchestrator(self.endpoint, source, self.workers)
+        else:
+            async with self.orchestrator._lock:  # wait for a running generation to finish
+                self.orchestrator.set_model(source)
+        log.info("now serving %s", source.cfg["name"])
 
 
 def _candidates(c: _Client) -> list:

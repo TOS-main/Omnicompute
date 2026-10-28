@@ -34,6 +34,7 @@ function init() {
   safeSet("edgemesh.key", key);
   setJoinLink(location.origin);
   refresh();
+  refreshModel(true);
   setInterval(refresh, 3000);
 }
 
@@ -47,7 +48,58 @@ $("keyform").onsubmit = (e) => {
   e.preventDefault();
   key = $("keyinput").value.trim();
   $("keybox").hidden = true;
-  init();
+  // ---- model loading ----
+
+const gb = (b) => (b / 2 ** 30).toFixed(2);
+let modelTimer = null, lastModel = null;
+
+async function refreshModel(first) {
+  let m;
+  try {
+    const r = await fetch("/api/model", { headers: { "X-Mesh-Key": key } });
+    if (!r.ok) return;
+    m = await r.json();
+  } catch { return; }
+  if (m.model) {
+    const c = m.model;
+    $("modelinfo").textContent = `${c.name} · ${c.n_layer} layers · ${c.arch === "llama" ? c.hf_type || "llama" : "gpt2"}`
+      + (m.chat_template ? " · chat" : "");
+    if (first || lastModel !== c.name) $("chat").checked = !!m.chat_template;
+    lastModel = c.name;
+  } else {
+    $("modelinfo").textContent = "No model loaded yet.";
+  }
+  const d = m.download, busy = d && ["starting", "downloading", "loading"].includes(d.state);
+  $("dl").hidden = !d || d.state === "ready";
+  $("hfload").disabled = !!busy;
+  if (d) {
+    const pct = d.total ? Math.round((100 * d.done) / d.total) : 0;
+    $("dlbar").style.width = `${d.state === "loading" ? 100 : pct}%`;
+    $("dltext").className = d.state === "error" ? "warn" : "muted";
+    $("dltext").textContent = d.state === "error" ? `Could not load ${d.repo}: ${d.error}`
+      : d.state === "downloading" ? `Downloading ${d.repo}: ${gb(d.done)} / ${gb(d.total)} GB (${pct}%)`
+      : d.state === "loading" ? `Preparing ${d.repo}…` : `Starting ${d.repo}…`;
+  }
+  clearTimeout(modelTimer);
+  modelTimer = setTimeout(refreshModel, busy ? 1000 : 5000);
+}
+
+for (const chip of document.querySelectorAll(".chip")) chip.onclick = () => { $("hfrepo").value = chip.dataset.repo; };
+
+$("hfform").onsubmit = async (e) => {
+  e.preventDefault();
+  const repo = $("hfrepo").value.trim();
+  if (!repo) return;
+  const r = await fetch("/api/model", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Mesh-Key": key },
+    body: JSON.stringify({ repo, token: $("hftoken").value.trim() }),
+  });
+  if (!r.ok) { $("dl").hidden = false; $("dltext").className = "warn"; $("dltext").textContent = await r.text(); return; }
+  refreshModel();
+};
+
+init();
 };
 
 $("copy").onclick = async () => {
@@ -123,7 +175,7 @@ $("run").onclick = async () => {
     const r = await fetch("/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Mesh-Key": key },
-      body: JSON.stringify({ prompt, max_new: +$("maxnew").value, temperature: +$("temp").value }),
+      body: JSON.stringify({ prompt, max_new: +$("maxnew").value, temperature: +$("temp").value, chat: $("chat").checked }),
     });
     if (!r.ok) throw new Error(await r.text());
     const reader = r.body.getReader(), td = new TextDecoder();
@@ -149,6 +201,57 @@ $("run").onclick = async () => {
     btn.disabled = false;
     refresh();
   }
+};
+
+// ---- model loading ----
+
+const gb = (b) => (b / 2 ** 30).toFixed(2);
+let modelTimer = null, lastModel = null;
+
+async function refreshModel(first) {
+  let m;
+  try {
+    const r = await fetch("/api/model", { headers: { "X-Mesh-Key": key } });
+    if (!r.ok) return;
+    m = await r.json();
+  } catch { return; }
+  if (m.model) {
+    const c = m.model;
+    $("modelinfo").textContent = `${c.name} · ${c.n_layer} layers · ${c.arch === "llama" ? c.hf_type || "llama" : "gpt2"}`
+      + (m.chat_template ? " · chat" : "");
+    if (first || lastModel !== c.name) $("chat").checked = !!m.chat_template;
+    lastModel = c.name;
+  } else {
+    $("modelinfo").textContent = "No model loaded yet.";
+  }
+  const d = m.download, busy = d && ["starting", "downloading", "loading"].includes(d.state);
+  $("dl").hidden = !d || d.state === "ready";
+  $("hfload").disabled = !!busy;
+  if (d) {
+    const pct = d.total ? Math.round((100 * d.done) / d.total) : 0;
+    $("dlbar").style.width = `${d.state === "loading" ? 100 : pct}%`;
+    $("dltext").className = d.state === "error" ? "warn" : "muted";
+    $("dltext").textContent = d.state === "error" ? `Could not load ${d.repo}: ${d.error}`
+      : d.state === "downloading" ? `Downloading ${d.repo}: ${gb(d.done)} / ${gb(d.total)} GB (${pct}%)`
+      : d.state === "loading" ? `Preparing ${d.repo}…` : `Starting ${d.repo}…`;
+  }
+  clearTimeout(modelTimer);
+  modelTimer = setTimeout(refreshModel, busy ? 1000 : 5000);
+}
+
+for (const chip of document.querySelectorAll(".chip")) chip.onclick = () => { $("hfrepo").value = chip.dataset.repo; };
+
+$("hfform").onsubmit = async (e) => {
+  e.preventDefault();
+  const repo = $("hfrepo").value.trim();
+  if (!repo) return;
+  const r = await fetch("/api/model", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Mesh-Key": key },
+    body: JSON.stringify({ repo, token: $("hftoken").value.trim() }),
+  });
+  if (!r.ok) { $("dl").hidden = false; $("dltext").className = "warn"; $("dltext").textContent = await r.text(); return; }
+  refreshModel();
 };
 
 init();

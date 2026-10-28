@@ -76,12 +76,56 @@ async def _run_worker(url: str, key: str, name: str, relay_only: bool, mem_fract
         print(f"[{name}] reconnecting...", flush=True)
 
 
+def _open_model(spec: str | None, token: str | None):
+    """None -> demo model; *.emm -> EdgeMesh file; folder or hf:org/name or org/name -> Hugging Face."""
+    from .model import DictSource, load_model
+
+    if not spec:
+        return DictSource(*load_model(_demo_model()))
+    if spec.endswith(".emm") and os.path.isfile(spec):
+        return DictSource(*load_model(spec))
+    from .hf import Download, resolve
+
+    if not os.path.isdir(spec) and not spec.startswith("hf:"):
+        spec = "hf:" + spec
+    progress = Download(spec)
+    done = asyncio.Event()
+
+    async def report():
+        while not done.is_set():
+            if progress.state == "downloading" and progress.total:
+                print(f"\r  downloading {spec[3:]}: {progress.done / 2**30:.2f} / {progress.total / 2**30:.2f} GB",
+                      end="", flush=True)
+            await asyncio.sleep(1)
+
+    return progress, done, report, lambda: resolve(spec, HOME / "models", token, progress)
+
+
+async def _load_source(spec: str | None, token: str | None):
+    opened = _open_model(spec, token)
+    if not isinstance(opened, tuple):
+        return opened
+    progress, done, report, load = opened
+    task = asyncio.ensure_future(report())
+    try:
+        return await asyncio.to_thread(load)
+    finally:
+        done.set()
+        await task
+        if progress.total:
+            print()
+
+
 async def cmd_host(args) -> None:
     from .hub import Hub
 
     key = _mesh_key(args.key)
-    model = args.model or _demo_model()
-    hub = Hub(key, args.bind, args.port, model)
+    token = args.hf_token or os.environ.get("HF_TOKEN")
+    try:
+        source = await _load_source(args.model, token)
+    except (ValueError, PermissionError, FileNotFoundError) as e:
+        sys.exit(f"could not load model: {e}")
+    hub = Hub(key, args.bind, args.port, source, str(HOME / "models"), token)
     await hub.start()
     hub.lan_origin = f"http://{_lan_ip()}:{hub.port}"
     lan = f"{hub.lan_origin}/?k={key}"
@@ -90,7 +134,8 @@ async def cmd_host(args) -> None:
     print(f"  From other networks (Wi-Fi elsewhere, cellular): forward TCP+UDP port {hub.port} on this")
     print(f"  machine's router, or run the hub on a cloud VM, and use http://<public-ip>:{hub.port}/?k={key}")
     print(f"  Add a PC/Mac as a worker:              edgemesh join \"{lan}\"")
-    print(f"  Model: {hub.orchestrator.cfg.get('name')} ({hub.orchestrator.cfg['n_layer']} layers)\n", flush=True)
+    print(f"  Model: {hub.orchestrator.cfg.get('name')} ({hub.orchestrator.cfg['n_layer']} layers). "
+          "Load another from Hugging Face on the web page.\n", flush=True)
     tasks = []
     if not args.no_worker:
         tasks.append(asyncio.ensure_future(_run_worker(f"http://127.0.0.1:{hub.port}", key,
@@ -121,7 +166,7 @@ async def cmd_run(args) -> None:
 
     url, key = parse_join_url(args.url)
     key = args.key or key
-    body = {"prompt": args.prompt, "max_new": args.max_new, "temperature": args.temperature}
+    body = {"prompt": args.prompt, "max_new": args.max_new, "temperature": args.temperature, "chat": args.chat}
     printed = 0
     async with aiohttp.ClientSession() as s:
         async with s.post(url + "/api/generate", json=body, headers={"X-Mesh-Key": key}) as r:
@@ -162,10 +207,9 @@ def cmd_make_model(args) -> None:
     print(f"wrote {args.out}")
 
 
-def cmd_convert_gpt2(args) -> None:
-    from .convert import convert_gpt2
-
-    print(f"wrote {convert_gpt2(args.out_dir, args.variant)}")
+async def cmd_pull(args) -> None:
+    src = await _load_source(args.repo, args.hf_token or os.environ.get("HF_TOKEN"))
+    print(f"{src.cfg['name']}: {src.cfg['n_layer']} layers, saved in {src.folder}")
 
 
 def _interactive() -> list[str]:
@@ -187,7 +231,10 @@ def main(argv: list[str] | None = None) -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     h = sub.add_parser("host", help="run the hub (+ a local worker) and serve the web page")
-    h.add_argument("--model", help="model file (default: a small random demo model)")
+    h.add_argument("--model", help="Hugging Face repo (e.g. Qwen/Qwen2.5-0.5B-Instruct), a local HF folder, "
+                                   "or a .emm file (default: a small random demo model; you can switch "
+                                   "models from the web page)")
+    h.add_argument("--hf-token", help="Hugging Face token for gated/private models (or set HF_TOKEN)")
     h.add_argument("--port", type=int, default=8000)
     h.add_argument("--bind", default="0.0.0.0")
     h.add_argument("--key", help="mesh key (default: generated once, stored in ~/.edgemesh)")
@@ -207,6 +254,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--key")
     r.add_argument("--max-new", type=int, default=40)
     r.add_argument("--temperature", type=float, default=0.0)
+    r.add_argument("--chat", action="store_true", help="wrap the prompt in the model's chat template")
 
     s = sub.add_parser("status", help="show devices and the current layer split")
     s.add_argument("url")
@@ -220,15 +268,15 @@ def main(argv: list[str] | None = None) -> None:
     m.add_argument("--ctx", type=int, default=256)
     m.add_argument("--seed", type=int, default=0)
 
-    c = sub.add_parser("convert-gpt2", help="download GPT-2 from Hugging Face and convert it")
-    c.add_argument("out_dir")
-    c.add_argument("--variant", default="gpt2", help="gpt2, gpt2-medium, distilgpt2, ...")
+    c = sub.add_parser("pull", help="download a Hugging Face model ahead of time")
+    c.add_argument("repo", help="e.g. Qwen/Qwen2.5-0.5B-Instruct")
+    c.add_argument("--hf-token")
 
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(name)s %(message)s")
     fn = {"host": cmd_host, "join": cmd_join, "run": cmd_run, "status": cmd_status,
-          "make-model": cmd_make_model, "convert-gpt2": cmd_convert_gpt2}[args.cmd]
+          "make-model": cmd_make_model, "pull": cmd_pull}[args.cmd]
     try:
         if asyncio.iscoroutinefunction(fn):
             asyncio.run(fn(args))

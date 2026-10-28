@@ -22,7 +22,7 @@ function matmul(x, T, K, W, N, b) {
   const out = new Float32Array(T * N);
   const acc = new Float64Array(N);
   for (let i = 0; i < T; i++) {
-    acc.set(b);
+    if (b) acc.set(b); else acc.fill(0);
     const xo = i * K;
     for (let k = 0; k < K; k++) {
       const xv = x[xo + k];
@@ -43,17 +43,63 @@ function gelu(a) {
   return a;
 }
 
+function rmsNorm(x, T, D, w, eps, out) {
+  for (let i = 0; i < T; i++) {
+    const o = i * D;
+    let ss = 0;
+    for (let k = 0; k < D; k++) ss += x[o + k] * x[o + k];
+    const inv = 1 / Math.sqrt(ss / D + eps);
+    for (let k = 0; k < D; k++) out[o + k] = x[o + k] * inv * w[k];
+  }
+  return out;
+}
+
+function ropeInvFreq(cfg) {
+  const hd = cfg.head_dim, theta = cfg.rope_theta || 10000;
+  let inv = [];
+  for (let i = 0; i < hd; i += 2) inv.push(1 / Math.pow(theta, i / hd));
+  const rs = cfg.rope_scaling || {}, kind = rs.rope_type || rs.type;
+  if (kind === "linear") inv = inv.map((f) => f / rs.factor);
+  else if (kind === "llama3") {
+    const f = rs.factor, lo = rs.low_freq_factor ?? 1, hi = rs.high_freq_factor ?? 4;
+    const old = rs.original_max_position_embeddings ?? 8192;
+    inv = inv.map((v) => {
+      const wl = (2 * Math.PI) / v;
+      const scaled = wl > old / lo ? v / f : v;
+      if (wl <= old / lo && wl >= old / hi) {
+        const s = (old / wl - lo) / (hi - lo);
+        return ((1 - s) * scaled) / f + s * scaled;
+      }
+      return scaled;
+    });
+  }
+  return Float64Array.from(inv);
+}
+
+// rotate one head vector (length hd) in place, HF "rotate_half" convention
+function rope(vec, off, hd, p, inv) {
+  const half = hd / 2;
+  for (let j = 0; j < half; j++) {
+    const a = p * inv[j], c = Math.fround(Math.cos(a)), s = Math.fround(Math.sin(a));
+    const x1 = vec[off + j], x2 = vec[off + half + j];
+    vec[off + j] = x1 * c - x2 * s;
+    vec[off + half + j] = x2 * c + x1 * s;
+  }
+}
+
 class Shard {
   constructor(cfg, tensors, start, end) {
     this.cfg = cfg; this.w = tensors; this.start = start; this.end = end;
     this.first = start === 0; this.last = end === cfg.n_layer;
-    this.caches = new Map(); // job -> {len, k: {layer: Float32Array(n_ctx*D)}, v: {...}}
+    this.llama = cfg.arch === "llama";
+    if (this.llama) this.inv = ropeInvFreq(cfg);
+    this.caches = new Map(); // job -> {len, k: {layer: Float32Array}, v: {...}}
   }
 
   drop(job) { this.caches.delete(job); }
 
   forward(job, x, pos) {
-    const { n_embd: D, n_ctx: C } = this.cfg;
+    const D = this.cfg.n_embd, w = (n) => this.w[n].data;
     let cache = this.caches.get(job);
     if (!cache || cache.len !== pos) {
       if (pos !== 0) throw new Error(`no KV cache for job ${job} at position ${pos}`);
@@ -66,74 +112,117 @@ class Shard {
     let T, h;
     if (this.first) {
       T = x.data.length;
-      const wte = this.w["wte"].data, wpe = this.w["wpe"].data;
       h = new Float32Array(T * D);
+      const emb = w(this.llama ? "embed" : "wte"), wpe = this.llama ? null : w("wpe");
       for (let i = 0; i < T; i++) {
         const id = x.data[i];
-        for (let k = 0; k < D; k++) h[i * D + k] = wte[id * D + k] + wpe[(pos + i) * D + k];
+        for (let k = 0; k < D; k++) h[i * D + k] = emb[id * D + k] + (wpe ? wpe[(pos + i) * D + k] : 0);
       }
     } else {
       T = x.shape[0];
       h = Float32Array.from(x.data);
     }
-    for (let l = this.start; l < this.end; l++) h = this.block(l, h, T, pos, cache);
+    for (let l = this.start; l < this.end; l++) h = this.llama ? this.llamaBlock(l, h, T, pos, cache) : this.gpt2Block(l, h, T, pos, cache);
     cache.len = pos + T;
+    if (!this.last) return { data: h, shape: [T, D] };
 
-    if (this.last) {
-      const V = this.cfg.vocab;
-      const lastRow = layerNorm(h.subarray((T - 1) * D, T * D), 1, D, this.w["ln_f.w"].data, this.w["ln_f.b"].data, new Float32Array(D));
-      const wte = this.w["wte"].data, logits = new Float32Array(V);
-      for (let t = 0; t < V; t++) {
-        let s = 0;
-        for (let k = 0; k < D; k++) s += lastRow[k] * wte[t * D + k];
-        logits[t] = s;
-      }
-      return { data: logits, shape: [V] };
+    const V = this.cfg.vocab, row = h.subarray((T - 1) * D, T * D), n = new Float32Array(D);
+    if (this.llama) rmsNorm(row, 1, D, w("norm_f"), this.cfg.rms_eps, n);
+    else layerNorm(row, 1, D, w("ln_f.w"), w("ln_f.b"), n);
+    if (this.llama && this.w["lm_head"]) return { data: matmul(n, 1, D, w("lm_head"), V, null), shape: [V] };
+    const emb = w(this.llama ? "embed" : "wte"), logits = new Float32Array(V); // tied head: rows of the embedding
+    for (let t = 0; t < V; t++) {
+      let s = 0;
+      for (let k = 0; k < D; k++) s += n[k] * emb[t * D + k];
+      logits[t] = s;
     }
-    return { data: h, shape: [T, D] };
+    return { data: logits, shape: [V] };
   }
 
-  block(i, x, T, pos, cache) {
-    const w = (n) => this.w[`h.${i}.${n}`].data;
-    const { n_embd: D, n_head: H, n_ctx: C } = this.cfg;
-    const hd = D / H, scale = 1 / Math.sqrt(hd);
-    const h = layerNorm(x, T, D, w("ln_1.w"), w("ln_1.b"), new Float32Array(T * D));
-    const qkv = matmul(h, T, D, w("attn.c_attn.w"), 3 * D, w("attn.c_attn.b"));
-    if (!cache.k[i]) { cache.k[i] = new Float32Array(C * D); cache.v[i] = new Float32Array(C * D); }
-    const K = cache.k[i], Vc = cache.v[i];
-    for (let t = 0; t < T; t++) {
-      K.set(qkv.subarray(t * 3 * D + D, t * 3 * D + 2 * D), (pos + t) * D);
-      Vc.set(qkv.subarray(t * 3 * D + 2 * D, t * 3 * D + 3 * D), (pos + t) * D);
-    }
-    const y = new Float32Array(T * D);
+  // q: [T, H*hd] (row stride qs, offset qo), keys/values cached as [S, KV*hd]; writes y [T, H*hd]
+  attend(q, qs, qo, K, Vc, T, pos, H, KV, hd) {
+    const y = new Float32Array(T * H * hd), kvw = KV * hd, group = H / KV, scale = 1 / Math.sqrt(hd);
     const scores = new Float64Array(pos + T);
     for (let t = 0; t < T; t++) {
-      const S = pos + t + 1; // causal: attend to positions 0..pos+t
+      const S = pos + t + 1;
       for (let hh = 0; hh < H; hh++) {
-        const qo = t * 3 * D + hh * hd;
+        const qb = t * qs + qo + hh * hd, kh = Math.floor(hh / group) * hd;
         let max = -Infinity;
         for (let s = 0; s < S; s++) {
           let d = 0;
-          const ko = s * D + hh * hd;
-          for (let k = 0; k < hd; k++) d += qkv[qo + k] * K[ko + k];
+          const kb = s * kvw + kh;
+          for (let k = 0; k < hd; k++) d += q[qb + k] * K[kb + k];
           d = Math.fround(d) * scale;
           scores[s] = d;
           if (d > max) max = d;
         }
         let sum = 0;
         for (let s = 0; s < S; s++) { scores[s] = Math.exp(scores[s] - max); sum += scores[s]; }
-        const yo = t * D + hh * hd;
+        const yb = t * H * hd + hh * hd;
         for (let s = 0; s < S; s++) {
-          const p = scores[s] / sum, vo = s * D + hh * hd;
-          for (let k = 0; k < hd; k++) y[yo + k] += p * Vc[vo + k];
+          const p = scores[s] / sum, vb = s * kvw + kh;
+          for (let k = 0; k < hd; k++) y[yb + k] += p * Vc[vb + k];
         }
       }
     }
+    return y;
+  }
+
+  kv(cache, i, width) {
+    if (!cache.k[i]) { cache.k[i] = new Float32Array(this.cfg.n_ctx * width); cache.v[i] = new Float32Array(this.cfg.n_ctx * width); }
+    return [cache.k[i], cache.v[i]];
+  }
+
+  gpt2Block(i, x, T, pos, cache) {
+    const w = (n) => this.w[`h.${i}.${n}`].data;
+    const { n_embd: D, n_head: H } = this.cfg, hd = D / H;
+    const h = layerNorm(x, T, D, w("ln_1.w"), w("ln_1.b"), new Float32Array(T * D));
+    const qkv = matmul(h, T, D, w("attn.c_attn.w"), 3 * D, w("attn.c_attn.b"));
+    const [K, Vc] = this.kv(cache, i, D);
+    for (let t = 0; t < T; t++) {
+      K.set(qkv.subarray(t * 3 * D + D, t * 3 * D + 2 * D), (pos + t) * D);
+      Vc.set(qkv.subarray(t * 3 * D + 2 * D, t * 3 * D + 3 * D), (pos + t) * D);
+    }
+    const y = this.attend(qkv, 3 * D, 0, K, Vc, T, pos, H, H, hd);
     const a = matmul(y, T, D, w("attn.c_proj.w"), D, w("attn.c_proj.b"));
     for (let k = 0; k < a.length; k++) a[k] += x[k];
     const h2 = layerNorm(a, T, D, w("ln_2.w"), w("ln_2.b"), new Float32Array(T * D));
     const m = matmul(gelu(matmul(h2, T, D, w("mlp.c_fc.w"), 4 * D, w("mlp.c_fc.b"))), T, 4 * D, w("mlp.c_proj.w"), D, w("mlp.c_proj.b"));
     for (let k = 0; k < m.length; k++) m[k] += a[k];
+    return m;
+  }
+
+  llamaBlock(i, x, T, pos, cache) {
+    const opt = (n) => (this.w[`h.${i}.${n}`] ? this.w[`h.${i}.${n}`].data : null), w = (n) => this.w[`h.${i}.${n}`].data;
+    const { n_embd: D, n_head: H, n_kv_head: KV, head_dim: hd, ffn: F, rms_eps: eps } = this.cfg;
+    const h = rmsNorm(x, T, D, w("attn_norm"), eps, new Float32Array(T * D));
+    const q = matmul(h, T, D, w("q.w"), H * hd, opt("q.b"));
+    const k = matmul(h, T, D, w("k.w"), KV * hd, opt("k.b"));
+    const v = matmul(h, T, D, w("v.w"), KV * hd, opt("v.b"));
+    const qn = opt("q_norm"), kn = opt("k_norm");
+    for (let t = 0; t < T; t++) {
+      for (let hh = 0; hh < H; hh++) {
+        const o = t * H * hd + hh * hd;
+        if (qn) rmsNorm(q.subarray(o, o + hd), 1, hd, qn, eps, q.subarray(o, o + hd));
+        rope(q, o, hd, pos + t, this.inv);
+      }
+      for (let hh = 0; hh < KV; hh++) {
+        const o = t * KV * hd + hh * hd;
+        if (kn) rmsNorm(k.subarray(o, o + hd), 1, hd, kn, eps, k.subarray(o, o + hd));
+        rope(k, o, hd, pos + t, this.inv);
+      }
+    }
+    const [K, Vc] = this.kv(cache, i, KV * hd);
+    K.set(k, pos * KV * hd);
+    Vc.set(v, pos * KV * hd);
+    const y = this.attend(q, H * hd, 0, K, Vc, T, pos, H, KV, hd);
+    const a = matmul(y, T, H * hd, w("o.w"), D, null);
+    for (let j = 0; j < a.length; j++) a[j] += x[j];
+    const h2 = rmsNorm(a, T, D, w("mlp_norm"), eps, new Float32Array(T * D));
+    const g = matmul(h2, T, D, w("gate.w"), F, null), u = matmul(h2, T, D, w("up.w"), F, null);
+    for (let j = 0; j < g.length; j++) g[j] = (g[j] / (1 + Math.exp(-g[j]))) * u[j];
+    const m = matmul(g, T, F, w("down.w"), D, null);
+    for (let j = 0; j < m.length; j++) m[j] += a[j];
     return m;
   }
 }
@@ -156,7 +245,17 @@ function unpackMsg(u8) {
   return [JSON.parse(dec.decode(u8.subarray(4, 4 + n))), u8.subarray(4 + n)];
 }
 
-const DTYPES = { float32: Float32Array, int32: Int32Array };
+const DTYPES = { float32: Float32Array, int32: Int32Array, float16: Uint16Array };
+
+// float16 bits -> Float32Array (weights arrive as float16 to halve the download)
+const F16 = (() => {
+  const t = new Float32Array(65536);
+  for (let h = 0; h < 65536; h++) {
+    const s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 0x1f, m = h & 0x3ff;
+    t[h] = e === 0 ? s * m * 2 ** -24 : e === 31 ? (m ? NaN : s * Infinity) : s * (1 + m / 1024) * 2 ** (e - 15);
+  }
+  return t;
+})();
 
 function decodeTensors(u8) {
   const n = new DataView(u8.buffer, u8.byteOffset, u8.byteLength).getUint32(0, false);
@@ -168,7 +267,9 @@ function decodeTensors(u8) {
     if (!Ctor) throw new Error(`browser workers do not support ${t.dtype}`);
     const count = t.shape.reduce((a, b) => a * b, 1), nbytes = count * Ctor.BYTES_PER_ELEMENT;
     const copy = u8.slice(off, off + nbytes); // copy => aligned buffer
-    out[t.name] = { data: new Ctor(copy.buffer), shape: t.shape };
+    let data = new Ctor(copy.buffer);
+    if (t.dtype === "float16") { const f = new Float32Array(data.length); for (let i = 0; i < data.length; i++) f[i] = F16[data[i]]; data = f; }
+    out[t.name] = { data, shape: t.shape };
     off += nbytes + ((8 - (nbytes % 8)) % 8);
   }
   return out;

@@ -1,6 +1,6 @@
 import numpy as np
 
-from edgemesh.model import Shard, plan_layers, random_model, shard_tensors
+from edgemesh.model import DictSource, Shard, plan_layers, random_model, shard_tensors
 from edgemesh.protocol import decode_tensors, encode_tensors
 
 
@@ -14,10 +14,15 @@ def test_tensor_roundtrip():
     assert all(np.array_equal(t[k], back[k]) and t[k].dtype == back[k].dtype for k in t)
 
 
-def test_split_matches_full_model_with_kv_cache():
-    cfg, w = random_model(n_layer=6, n_embd=32, n_head=4, n_ctx=64)
+import pytest
+
+
+@pytest.mark.parametrize("kw", [{}, {"arch": "llama", "n_kv_head": 2, "qkv_bias": True},
+                                {"arch": "llama", "qk_norm": True, "tie": False}])
+def test_split_matches_full_model_with_kv_cache(kw):
+    cfg, w = random_model(n_layer=6, n_embd=32, n_head=4, n_ctx=64, **kw)
     ids = [5, 9, 200, 3]
-    shards = [Shard(cfg, shard_tensors(cfg, w, s, e), s, e) for s, e in [(0, 2), (2, 5), (5, 6)]]
+    shards = [Shard(cfg, shard_tensors(DictSource(cfg, w), s, e), s, e) for s, e in [(0, 2), (2, 5), (5, 6)]]
 
     def split(x, pos):
         for sh in shards:

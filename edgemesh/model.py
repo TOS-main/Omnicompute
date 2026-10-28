@@ -1,12 +1,13 @@
-"""A GPT-2-architecture decoder in plain numpy, split into layer shards.
+"""Decoder-only transformers in plain numpy, split into layer shards.
 
-The weight names and layouts follow Hugging Face's GPT-2 checkpoint (Conv1D
-weights stored [in, out]), so real GPT-2 weights can be dropped in with
-`edgemesh convert-gpt2`. The browser worker (web/model.js) implements the
-same math so phones can host shards too.
+Two architecture families cover most open models on Hugging Face:
+  * "gpt2":  GPT-2, DistilGPT-2 (LayerNorm, learned positions, GELU)
+  * "llama": Llama 2/3.x, Mistral, Qwen2/2.5/3, SmolLM, TinyLlama, Phi-3 and
+             their fine-tunes (RMSNorm, RoPE, grouped-query attention, SwiGLU)
 
-A model file is a tensor pack (see protocol.py) with a "__config__" entry
-holding the JSON config as uint8 bytes.
+Weights use internal names (see `tensor_shapes`) in [in, out] layout, so every
+projection is `x @ W`. They may be float16 to halve memory and bandwidth;
+compute is float32. The browser worker (web/model.js) implements the same math.
 """
 
 from __future__ import annotations
@@ -18,32 +19,89 @@ import numpy as np
 
 from .protocol import decode_tensors, encode_tensors
 
-
-def layer_keys(i: int) -> list[str]:
-    p = f"h.{i}."
-    return [p + k for k in ("ln_1.w", "ln_1.b", "attn.c_attn.w", "attn.c_attn.b", "attn.c_proj.w",
-                            "attn.c_proj.b", "ln_2.w", "ln_2.b", "mlp.c_fc.w", "mlp.c_fc.b",
-                            "mlp.c_proj.w", "mlp.c_proj.b")]
+# ---------------------------------------------------------------- weights
 
 
-def random_model(n_layer=8, n_embd=128, n_head=4, n_ctx=256, vocab=256, seed=0) -> tuple[dict, dict]:
+def tensor_shapes(cfg: dict) -> tuple[dict, dict]:
+    """(global tensors, per-layer tensors with "{i}" in the name) -> shapes."""
+    D, V = cfg["n_embd"], cfg["vocab"]
+    if cfg.get("arch", "gpt2") == "gpt2":
+        g = {"wte": (V, D), "wpe": (cfg["n_ctx"], D), "ln_f.w": (D,), "ln_f.b": (D,)}
+        per = {"ln_1.w": (D,), "ln_1.b": (D,), "attn.c_attn.w": (D, 3 * D), "attn.c_attn.b": (3 * D,),
+               "attn.c_proj.w": (D, D), "attn.c_proj.b": (D,), "ln_2.w": (D,), "ln_2.b": (D,),
+               "mlp.c_fc.w": (D, 4 * D), "mlp.c_fc.b": (4 * D,), "mlp.c_proj.w": (4 * D, D), "mlp.c_proj.b": (D,)}
+    else:
+        H, KV, hd, F = cfg["n_head"], cfg["n_kv_head"], cfg["head_dim"], cfg["ffn"]
+        g = {"embed": (V, D), "norm_f": (D,)}
+        if not cfg.get("tie_embeddings"):
+            g["lm_head"] = (D, V)
+        per = {"attn_norm": (D,), "q.w": (D, H * hd), "k.w": (D, KV * hd), "v.w": (D, KV * hd),
+               "o.w": (H * hd, D), "mlp_norm": (D,), "gate.w": (D, F), "up.w": (D, F), "down.w": (F, D)}
+        if cfg.get("qkv_bias"):
+            per.update({"q.b": (H * hd,), "k.b": (KV * hd,), "v.b": (KV * hd,)})
+        if cfg.get("qk_norm"):
+            per.update({"q_norm": (hd,), "k_norm": (hd,)})
+    return g, {"h.{i}." + k: v for k, v in per.items()}
+
+
+def layer_keys(cfg: dict, i: int) -> list[str]:
+    return [k.format(i=i) for k in tensor_shapes(cfg)[1]]
+
+
+def shard_keys(cfg: dict, start: int, end: int) -> list[str]:
+    """The tensors a device needs for layers [start, end)."""
+    gpt2 = cfg.get("arch", "gpt2") == "gpt2"
+    keys = [k for i in range(start, end) for k in layer_keys(cfg, i)]
+    if start == 0:
+        keys += ["wte", "wpe"] if gpt2 else ["embed"]
+    if end == cfg["n_layer"]:
+        if gpt2:
+            keys += ["ln_f.w", "ln_f.b", "wte"]
+        else:
+            keys += ["norm_f", "embed" if cfg.get("tie_embeddings") else "lm_head"]
+    return list(dict.fromkeys(keys))
+
+
+def shard_bytes(cfg: dict, start: int, end: int, bytes_per_param: int = 4) -> int:
+    g, per = tensor_shapes(cfg)
+    shapes = {**g, **{k.format(i=i): v for i in range(cfg["n_layer"]) for k, v in per.items()}}
+    return sum(int(np.prod(shapes[k])) for k in shard_keys(cfg, start, end)) * bytes_per_param
+
+
+class DictSource:
+    """Model weights held in memory (random demo models, .emm files)."""
+
+    def __init__(self, cfg: dict, weights: dict):
+        self.cfg, self.weights = cfg, weights
+
+    def get(self, name: str) -> np.ndarray:
+        return self.weights[name]
+
+
+def shard_tensors(source, start: int, end: int) -> dict:
+    return {k: source.get(k) for k in shard_keys(source.cfg, start, end)}
+
+
+def random_model(n_layer=8, n_embd=128, n_head=4, n_ctx=256, vocab=256, seed=0, arch="gpt2",
+                 n_kv_head=None, qkv_bias=False, qk_norm=False, tie=True) -> tuple[dict, dict]:
     """A randomly initialised model; useful for testing the mesh without downloads."""
     rng = np.random.default_rng(seed)
-    cfg = {"n_layer": n_layer, "n_embd": n_embd, "n_head": n_head, "n_ctx": n_ctx, "vocab": vocab,
-           "tokenizer": "bytes", "name": f"random-{n_layer}x{n_embd}"}
-    D = n_embd
-    w = {"wte": rng.normal(0, 0.1, (vocab, D)), "wpe": rng.normal(0, 0.02, (n_ctx, D)),
-         "ln_f.w": np.ones(D), "ln_f.b": np.zeros(D)}
-    for i in range(n_layer):
-        k = layer_keys(i)
-        shapes = [(D,), (D,), (D, 3 * D), (3 * D,), (D, D), (D,), (D,), (D,), (D, 4 * D), (4 * D,), (4 * D, D), (D,)]
-        for name, shape in zip(k, shapes):
-            if name.endswith("ln_1.w") or name.endswith("ln_2.w"):
-                w[name] = np.ones(shape)
-            elif len(shape) == 1:
-                w[name] = np.zeros(shape)
-            else:
-                w[name] = rng.normal(0, 0.02 * (2 if "c_fc" in name or "c_attn" in name else 1), shape)
+    cfg = {"arch": arch, "n_layer": n_layer, "n_embd": n_embd, "n_head": n_head, "n_ctx": n_ctx,
+           "vocab": vocab, "tokenizer": "bytes", "name": f"random-{arch}-{n_layer}x{n_embd}"}
+    if arch == "llama":
+        cfg.update({"n_kv_head": n_kv_head or n_head, "head_dim": n_embd // n_head, "ffn": 3 * n_embd,
+                    "rope_theta": 10000.0, "rms_eps": 1e-6, "tie_embeddings": tie,
+                    "qkv_bias": qkv_bias, "qk_norm": qk_norm})
+    g, per = tensor_shapes(cfg)
+    norms = ("norm_f", "attn_norm", "mlp_norm", "q_norm", "k_norm", "ln_1.w", "ln_2.w", "ln_f.w")
+    w = {}
+    for name, shape in [*g.items(), *[(k.format(i=i), s) for i in range(n_layer) for k, s in per.items()]]:
+        if name.endswith(norms):
+            w[name] = 1 + rng.normal(0, 0.05, shape)
+        elif len(shape) == 1:
+            w[name] = rng.normal(0, 0.02, shape)
+        else:
+            w[name] = rng.normal(0, 0.1 if name in ("wte", "embed") else 0.05, shape)
     return cfg, {k: v.astype(np.float32) for k, v in w.items()}
 
 
@@ -61,31 +119,74 @@ def load_model(path: str) -> tuple[dict, dict]:
     return cfg, t
 
 
-def shard_tensors(cfg: dict, weights: dict, start: int, end: int) -> dict:
-    """Only the tensors a device needs for layers [start, end)."""
-    keys = [k for i in range(start, end) for k in layer_keys(i)]
-    if start == 0:
-        keys += ["wte", "wpe"]
-    if end == cfg["n_layer"]:
-        keys += ["ln_f.w", "ln_f.b"] + ([] if start == 0 else ["wte"])  # tied LM head
-    return {k: weights[k] for k in keys}
+# ---------------------------------------------------------------- math
 
 
-def shard_bytes(cfg: dict, start: int, end: int) -> int:
-    D, V, C = cfg["n_embd"], cfg["vocab"], cfg["n_ctx"]
-    per_layer = 4 * (12 * D * D + 13 * D)
-    extra = (4 * (V * D + C * D) if start == 0 else 0) + (4 * V * D if end == cfg["n_layer"] and start else 0)
-    return per_layer * (end - start) + extra
+def _f32(w: np.ndarray) -> np.ndarray:
+    return w if w.dtype == np.float32 else w.astype(np.float32)
+
+
+def _mm(x: np.ndarray, w: np.ndarray, b: np.ndarray | None = None) -> np.ndarray:
+    y = x @ _f32(w)
+    return y + _f32(b) if b is not None else y
 
 
 def _layernorm(x, w, b, eps=1e-5):
     mu = x.mean(-1, keepdims=True)
     var = ((x - mu) ** 2).mean(-1, keepdims=True)
-    return (x - mu) / np.sqrt(var + eps) * w + b
+    return (x - mu) / np.sqrt(var + eps) * _f32(w) + _f32(b)
+
+
+def _rmsnorm(x, w, eps):
+    return x / np.sqrt((x * x).mean(-1, keepdims=True) + eps) * _f32(w)
 
 
 def _gelu(x):
     return 0.5 * x * (1 + np.tanh(0.7978845608028654 * (x + 0.044715 * x ** 3)))
+
+
+def rope_inv_freq(cfg: dict) -> np.ndarray:
+    hd = cfg["head_dim"]
+    inv = 1.0 / (cfg.get("rope_theta", 10000.0) ** (np.arange(0, hd, 2, dtype=np.float64) / hd))
+    rs = cfg.get("rope_scaling") or {}
+    kind = rs.get("rope_type", rs.get("type"))
+    if kind == "linear":
+        inv = inv / rs["factor"]
+    elif kind == "llama3":  # Llama 3.1+ long-context frequency scaling
+        factor, lo, hi = rs["factor"], rs.get("low_freq_factor", 1.0), rs.get("high_freq_factor", 4.0)
+        old = rs.get("original_max_position_embeddings", 8192)
+        wavelen = 2 * np.pi / inv
+        smooth = (old / wavelen - lo) / (hi - lo)
+        scaled = np.where(wavelen > old / lo, inv / factor, inv)
+        mid = (wavelen <= old / lo) & (wavelen >= old / hi)
+        inv = np.where(mid, (1 - smooth) * scaled / factor + smooth * scaled, scaled)
+    return inv
+
+
+def _rope(x: np.ndarray, pos: int, inv: np.ndarray) -> np.ndarray:
+    """x: [heads, T, hd], HF "rotate_half" convention."""
+    T = x.shape[1]
+    ang = np.arange(pos, pos + T, dtype=np.float64)[:, None] * inv[None, :]
+    cos, sin = np.cos(ang).astype(np.float32), np.sin(ang).astype(np.float32)
+    cos, sin = np.concatenate([cos, cos], -1), np.concatenate([sin, sin], -1)
+    half = x.shape[-1] // 2
+    rot = np.concatenate([-x[..., half:], x[..., :half]], -1)
+    return x * cos + rot * sin
+
+
+def _attend(q, k, v, pos):
+    """q: [H, T, hd], k/v: [KV, S, hd] -> [T, H*hd], causal, grouped-query."""
+    H, T, hd = q.shape
+    groups = H // k.shape[0]
+    if groups > 1:
+        k, v = np.repeat(k, groups, axis=0), np.repeat(v, groups, axis=0)
+    S = k.shape[1]
+    att = q @ k.transpose(0, 2, 1) / np.sqrt(hd)
+    mask = np.arange(S)[None, :] > (pos + np.arange(T))[:, None]
+    att = np.where(mask[None], -1e30, att)
+    att = np.exp(att - att.max(-1, keepdims=True))
+    att /= att.sum(-1, keepdims=True)
+    return (att @ v).transpose(1, 0, 2).reshape(T, H * hd)
 
 
 class Shard:
@@ -100,6 +201,8 @@ class Shard:
     def __init__(self, cfg: dict, tensors: dict, start: int, end: int):
         self.cfg, self.w, self.start, self.end = cfg, tensors, start, end
         self.first, self.last = start == 0, end == cfg["n_layer"]
+        self.llama = cfg.get("arch", "gpt2") == "llama"
+        self.inv_freq = rope_inv_freq(cfg) if self.llama else None
         self.caches: OrderedDict[str, dict] = OrderedDict()
 
     def forward(self, job: str, x: np.ndarray, pos: int) -> np.ndarray:
@@ -115,47 +218,77 @@ class Shard:
         w = self.w
         if self.first:
             ids = x.astype(np.int64)
-            x = w["wte"][ids] + w["wpe"][pos : pos + len(ids)]
+            if self.llama:
+                x = _f32(w["embed"][ids])
+            else:
+                x = _f32(w["wte"][ids]) + _f32(w["wpe"][pos : pos + len(ids)])
         x = x.astype(np.float32)
+        block = self._llama_block if self.llama else self._gpt2_block
         for i in range(self.start, self.end):
-            x = self._block(i, x, pos, cache["kv"])
+            x = block(i, x, pos, cache["kv"])
         cache["len"] = pos + x.shape[0]
         if self.last:
-            h = _layernorm(x[-1:], w["ln_f.w"], w["ln_f.b"])
-            return (h @ w["wte"].T)[0].astype(np.float32)
+            if self.llama:
+                h = _rmsnorm(x[-1:], w["norm_f"], self.cfg["rms_eps"])
+                head = w["lm_head"] if "lm_head" in w else w["embed"].T
+            else:
+                h = _layernorm(x[-1:], w["ln_f.w"], w["ln_f.b"])
+                head = w["wte"].T
+            return (h @ _f32(head))[0].astype(np.float32)
         return x
 
     def drop(self, job: str) -> None:
         self.caches.pop(job, None)
 
-    def _block(self, i: int, x: np.ndarray, pos: int, kv: dict) -> np.ndarray:
-        w, p = self.w, f"h.{i}."
-        H = self.cfg["n_head"]
-        T, D = x.shape
-        hd = D // H
-        h = _layernorm(x, w[p + "ln_1.w"], w[p + "ln_1.b"])
-        qkv = h @ w[p + "attn.c_attn.w"] + w[p + "attn.c_attn.b"]
-        q, k, v = (a.reshape(T, H, hd).transpose(1, 0, 2) for a in np.split(qkv, 3, axis=-1))
+    @staticmethod
+    def _cache(kv: dict, i: int, k: np.ndarray, v: np.ndarray):
         if i in kv:
             k = np.concatenate([kv[i][0], k], axis=1)
             v = np.concatenate([kv[i][1], v], axis=1)
         kv[i] = (k, v)
-        S = k.shape[1]
-        att = q @ k.transpose(0, 2, 1) / np.sqrt(hd)
-        mask = np.arange(S)[None, :] > (pos + np.arange(T))[:, None]
-        att = np.where(mask[None], -1e10, att)
-        att = np.exp(att - att.max(-1, keepdims=True))
-        att /= att.sum(-1, keepdims=True)
-        y = (att @ v).transpose(1, 0, 2).reshape(T, D)
-        x = x + y @ w[p + "attn.c_proj.w"] + w[p + "attn.c_proj.b"]
+        return k, v
+
+    def _gpt2_block(self, i: int, x: np.ndarray, pos: int, kv: dict) -> np.ndarray:
+        w, p = self.w, f"h.{i}."
+        H = self.cfg["n_head"]
+        T, D = x.shape
+        h = _layernorm(x, w[p + "ln_1.w"], w[p + "ln_1.b"])
+        qkv = _mm(h, w[p + "attn.c_attn.w"], w[p + "attn.c_attn.b"])
+        q, k, v = (a.reshape(T, H, D // H).transpose(1, 0, 2) for a in np.split(qkv, 3, axis=-1))
+        k, v = self._cache(kv, i, k, v)
+        x = x + _mm(_attend(q, k, v, pos), w[p + "attn.c_proj.w"], w[p + "attn.c_proj.b"])
         h = _layernorm(x, w[p + "ln_2.w"], w[p + "ln_2.b"])
-        x = x + _gelu(h @ w[p + "mlp.c_fc.w"] + w[p + "mlp.c_fc.b"]) @ w[p + "mlp.c_proj.w"] + w[p + "mlp.c_proj.b"]
+        x = x + _mm(_gelu(_mm(h, w[p + "mlp.c_fc.w"], w[p + "mlp.c_fc.b"])), w[p + "mlp.c_proj.w"], w[p + "mlp.c_proj.b"])
+        return x.astype(np.float32)
+
+    def _llama_block(self, i: int, x: np.ndarray, pos: int, kv: dict) -> np.ndarray:
+        w, p, c = self.w, f"h.{i}.", self.cfg
+        H, KV, hd, eps = c["n_head"], c["n_kv_head"], c["head_dim"], c["rms_eps"]
+        T = x.shape[0]
+        h = _rmsnorm(x, w[p + "attn_norm"], eps)
+        q = _mm(h, w[p + "q.w"], w.get(p + "q.b")).reshape(T, H, hd).transpose(1, 0, 2)
+        k = _mm(h, w[p + "k.w"], w.get(p + "k.b")).reshape(T, KV, hd).transpose(1, 0, 2)
+        v = _mm(h, w[p + "v.w"], w.get(p + "v.b")).reshape(T, KV, hd).transpose(1, 0, 2)
+        if p + "q_norm" in w:  # Qwen3: per-head RMSNorm on q and k
+            q, k = _rmsnorm(q, w[p + "q_norm"], eps), _rmsnorm(k, w[p + "k_norm"], eps)
+        q, k = _rope(q, pos, self.inv_freq), _rope(k, pos, self.inv_freq)
+        k, v = self._cache(kv, i, k.astype(np.float32), v)
+        x = x + _mm(_attend(q, k, v, pos), w[p + "o.w"])
+        h = _rmsnorm(x, w[p + "mlp_norm"], eps)
+        g = _mm(h, w[p + "gate.w"])
+        x = x + _mm(g / (1 + np.exp(-g)) * _mm(h, w[p + "up.w"]), w[p + "down.w"])
         return x.astype(np.float32)
 
 
-def plan_layers(n_layer: int, workers: list[dict], cfg: dict | None = None) -> list[tuple[str, int, int]]:
+# ---------------------------------------------------------------- planning
+
+
+def plan_layers(n_layer: int, workers: list[dict], cfg: dict | None = None,
+                bytes_per_param: int = 4) -> list[tuple[str, int, int]]:
     """Split layers into contiguous ranges, proportional to each worker's speed score,
-    without exceeding any worker's memory budget. Returns [(node_id, start, end)]."""
+    without exceeding any worker's memory budget. Returns [(node_id, start, end)].
+
+    A worker may report "weight_factor" (browser workers expand float16 to float32: 2)."""
     ws = sorted(workers, key=lambda w: -w.get("score", 1.0))
     if not ws:
         raise RuntimeError("no workers available")
@@ -168,10 +301,14 @@ def plan_layers(n_layer: int, workers: list[dict], cfg: dict | None = None) -> l
         counts[counts.index(min(counts))] += 1
 
     if cfg is not None:  # respect memory budgets by moving layers to workers with room
-        per_layer = shard_bytes(cfg, 1, 2)
-        embed_layers = -(-(shard_bytes(cfg, 0, 1) - per_layer) // per_layer)  # embeddings, in "layers"
+        per_layer = shard_bytes(cfg, 1, 2, bytes_per_param) if n_layer > 2 else \
+            shard_bytes(cfg, 0, 1, bytes_per_param) - shard_bytes(cfg, 0, 0, bytes_per_param)
+        first_extra = shard_bytes(cfg, 0, 0, bytes_per_param)
+        last_extra = shard_bytes(cfg, n_layer, n_layer, bytes_per_param)
+        embed_layers = -(-first_extra // per_layer)
+        head_layers = -(-last_extra // per_layer)
         ws, counts = list(ws), list(counts)
-        mems = [w.get("mem_mb", 1 << 20) * 1024 * 1024 for w in ws]
+        mems = [w.get("mem_mb", 1 << 20) * 1024 * 1024 / w.get("weight_factor", 1) for w in ws]
         if len(ws) > 1 and mems[0] // per_layer < embed_layers + 1:  # first device also holds the embeddings
             big = mems.index(max(mems))
             ws[0], ws[big] = ws[big], ws[0]
@@ -179,14 +316,16 @@ def plan_layers(n_layer: int, workers: list[dict], cfg: dict | None = None) -> l
         caps = [int(m // per_layer) for m in mems]
         caps[0] -= embed_layers
         if len(ws) > 1:
-            caps[-1] -= embed_layers  # the last device holds a copy of the (tied) output embedding
+            caps[-1] -= head_layers
         for _ in range(n_layer * len(ws)):
             over = [i for i, c in enumerate(counts) if c > max(caps[i], 0)]
             if not over:
                 break
             room = [i for i, c in enumerate(counts) if c < caps[i]]
             if not room:
-                raise RuntimeError("the connected devices do not have enough memory for this model")
+                need = shard_bytes(cfg, 0, n_layer, bytes_per_param) / 2 ** 30
+                raise RuntimeError(f"the connected devices do not have enough memory for this model "
+                                   f"(needs about {need:.1f} GB in total)")
             counts[over[0]] -= 1
             counts[room[0]] += 1
         if counts[0] == 0:

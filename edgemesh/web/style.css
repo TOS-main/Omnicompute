@@ -35,3 +35,12 @@ li:first-child { border-top: 0; }
 .tag { font-size: 13px; color: var(--muted); }
 .layers { font-weight: 600; color: var(--ok); }
 .ok { color: var(--ok); } .warn { color: var(--warn); }
+label.block { display: block; margin: 10px 0 0; }
+#hfrepo { flex: 1; min-width: 0; }
+#hftoken { width: 100%; margin-top: 8px; }
+label input[type=checkbox] { width: auto; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.chip { font-size: 13px; padding: 4px 10px; border-radius: 999px; }
+details { margin-top: 6px; color: var(--muted); font-size: 14px; }
+.bar { height: 8px; background: var(--code); border-radius: 999px; overflow: hidden; margin-top: 12px; }
+#dlbar { height: 100%; width: 0; background: var(--accent); transition: width 0.4s; }

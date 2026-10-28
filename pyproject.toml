@@ -8,10 +8,10 @@ version = "0.1.0"
 description = "Split AI model inference across phones and computers on any network"
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["numpy>=1.21", "cryptography>=3.4", "aiohttp>=3.8"]
+dependencies = ["numpy>=1.21", "cryptography>=3.4", "aiohttp>=3.8", "tokenizers>=0.15", "jinja2>=3"]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-asyncio", "playwright"]
+test = ["pytest", "pytest-asyncio", "playwright", "torch", "transformers"]
 
 [project.scripts]
 edgemesh = "edgemesh.cli:main"
