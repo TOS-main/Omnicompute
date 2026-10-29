@@ -317,6 +317,8 @@ async def cmd_links(args) -> None:
     print("  Install on another computer (runs in the background, uses its GPU):")
     print(f"    Windows PowerShell:  irm \"{origin}/install.ps1?c={ck}\" | iex")
     print(f"    Mac / Linux:         curl -fsSL \"{origin}/install.sh?c={ck}\" | sh")
+    print("  Make an Android phone the main computer instead (paste into Termux, same key):")
+    print(f"    curl -fsSL \"{origin}/termux.sh?k={key}\" | sh")
     if port is None:
         print("  (EdgeMesh isn't hosting on this computer right now; the port is 8000 unless it was busy.)")
 

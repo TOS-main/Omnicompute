@@ -408,3 +408,22 @@ def test_mesh_key_is_kept_and_can_be_set(tmp_path, monkeypatch, capsys):
     asyncio.run(cli.cmd_links(argparse.Namespace(key=None)))
     out = capsys.readouterr().out
     assert "?k=my-own-key-1" in out and "contribute?c=c" in out and "install.ps1?c=c" in out
+
+
+async def test_termux_host_script_needs_the_full_key(model_file):
+    import aiohttp
+
+    path, cfg, w = model_file
+    hub, nodes = await start_mesh(path, [])
+    base = f"http://127.0.0.1:{hub.port}"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{base}/termux.sh?k={hub.contribute_key}") as r:
+                assert r.status == 401  # a contributor can't take over hosting
+            async with s.get(f"{base}/termux.sh?k={KEY}") as r:
+                text = await r.text()
+        assert f'KEY="{KEY}"' in text and f'HUB="{base}"' in text and "--no-worker" in text
+    finally:
+        for x in nodes:
+            await x.close()
+        await hub.close()

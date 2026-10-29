@@ -64,6 +64,18 @@ saved and used from then on. `edgemesh links` (option 3 in the menu) prints the 
 links again. If a device says "wrong mesh key", its link is from another mesh or for another
 port: copy it again from `edgemesh links`.
 
+### A phone as the main computer
+
+A phone stays on with the screen off, so it can host instead of a laptop that sleeps. Install
+**Termux** (from F-Droid or GitHub), then paste the line `edgemesh links` prints on the current
+main computer: `curl -fsSL "http://MAIN:8000/termux.sh?k=KEY" | sh`. It installs EdgeMesh in
+Termux, keeps your mesh key (so only the address in your links changes), starts hosting with an
+https `--public` link, and holds a wake lock. The phone only coordinates (`--no-worker`), which
+uses little battery; the computers do the model's work. `edgemesh-host` starts it again,
+`edgemesh-host-stop` stops it, and with the Termux:Boot app it starts after a restart. Set
+Termux's battery setting to Unrestricted. Hosting downloads the model to the phone, so it needs
+the free space.
+
 ## Devices on other networks (school, cellular)
 
 `edgemesh host --public` opens a free Cloudflare quick tunnel and prints an `https://….trycloudflare.com`

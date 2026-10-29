@@ -129,6 +129,7 @@ class Hub:
             web.get("/contribute", self._contribute_page),
             web.get("/install.ps1", self._install),
             web.get("/install.sh", self._install),
+            web.get("/termux.sh", self._termux),
             web.get("/download/edgemesh.zip", self._package),
             web.get("/api/models", self._models),
             web.delete("/api/models", self._delete_model),
@@ -324,6 +325,14 @@ class Hub:
         name = "install.ps1" if request.path.endswith(".ps1") else "install.sh"
         text = (resources.files("edgemesh").joinpath("installers", name).read_text(encoding="utf-8")
                 .replace("@ORIGIN@", self._origin(request)).replace("@KEY@", self.contribute_key))
+        return web.Response(text=text, content_type="text/plain")
+
+    async def _termux(self, request: web.Request) -> web.Response:
+        """Moves hosting to an Android phone (Termux) with the same mesh key; needs the full key."""
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        text = (resources.files("edgemesh").joinpath("installers", "termux-host.sh").read_text(encoding="utf-8")
+                .replace("@ORIGIN@", self._origin(request)).replace("@KEY@", self.secret))
         return web.Response(text=text, content_type="text/plain")
 
     async def _package(self, request: web.Request) -> web.Response:
