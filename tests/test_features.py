@@ -293,3 +293,28 @@ async def test_remove_device_uninstalls_it(model_file, tmp_path):
         for n in nodes:
             await n.close()
         await hub.close()
+
+
+async def test_host_moves_to_a_free_port_or_reuses_a_running_hub(model_file, monkeypatch):
+    import socket
+
+    from edgemesh.cli import _start_on_free_port
+    from edgemesh.hub import Hub
+
+    path, cfg, w = model_file
+    busy = socket.socket()
+    busy.bind(("127.0.0.1", 0))
+    busy.listen()
+    port = busy.getsockname()[1]
+    first = Hub(KEY, "127.0.0.1", port, path)
+    opened = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+    try:
+        assert await _start_on_free_port(first, KEY, port)
+        assert first.port == port + 1  # something else had the port
+        second = Hub(KEY, "127.0.0.1", port, path)
+        assert not await _start_on_free_port(second, KEY, port)  # same mesh already running: open it instead
+        assert opened == [f"http://127.0.0.1:{port + 1}/?k={KEY}"]
+    finally:
+        busy.close()
+        await first.close()

@@ -14,6 +14,7 @@ spread across Wi-Fi and cellular networks.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -124,6 +125,7 @@ class Hub:
         app = web.Application(client_max_size=1 << 30)
         app.add_routes([
             web.get("/", self._index),
+            web.get("/api/hello", self._hello),
             web.get("/contribute", self._contribute_page),
             web.get("/install.ps1", self._install),
             web.get("/install.sh", self._install),
@@ -145,11 +147,16 @@ class Hub:
         ])
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, self.host, self.port)
-        await site.start()
-        self.port = site._server.sockets[0].getsockname()[1]
-        loop = asyncio.get_running_loop()
-        self._udp, _ = await loop.create_datagram_endpoint(lambda: _Reflector(self), local_addr=(self.host, self.port))
+        try:
+            site = web.TCPSite(self._runner, self.host, self.port)
+            await site.start()
+            self.port = site._server.sockets[0].getsockname()[1]
+            loop = asyncio.get_running_loop()
+            self._udp, _ = await loop.create_datagram_endpoint(lambda: _Reflector(self), local_addr=(self.host, self.port))
+        except OSError:  # port taken: free what we opened so the caller can try another port
+            await self._runner.cleanup()
+            self._runner = None
+            raise
         log.info("hub listening on tcp+udp port %d", self.port)
         self._pinger = asyncio.ensure_future(self._ping_loop())
 
@@ -297,6 +304,10 @@ class Hub:
 
     async def _index(self, request: web.Request) -> web.Response:
         return web.Response(text=_web_file("index.html"), content_type="text/html")
+
+    async def _hello(self, request: web.Request) -> web.Response:
+        """No key needed: lets a second `edgemesh host` see that EdgeMesh already runs on a port."""
+        return web.json_response({"edgemesh": True, "mesh": hashlib.sha256(self.secret.encode()).hexdigest()[:12]})
 
     async def _contribute_page(self, request: web.Request) -> web.Response:
         return web.Response(text=_web_file("contribute.html"), content_type="text/html")

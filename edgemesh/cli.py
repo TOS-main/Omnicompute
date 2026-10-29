@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -148,6 +149,50 @@ async def _load_source(spec: str | None, token: str | None):
             print()
 
 
+PORT_TAKEN = {errno.EADDRINUSE, errno.EACCES, 10048, 10013}  # 10013: Windows reserves some port ranges
+
+
+async def _edgemesh_on(port: int) -> dict | None:
+    import aiohttp
+
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as s:
+            async with s.get(f"http://127.0.0.1:{port}/api/hello") as r:
+                return (await r.json()) if r.status == 200 else None
+    except Exception:
+        return None
+
+
+async def _start_on_free_port(hub, key: str, port: int) -> bool:
+    """Start the hub on `port`, or the next free one. If this mesh's hub is already running
+    here, open it in the browser instead of failing. Returns False when nothing was started."""
+    import hashlib
+    import webbrowser
+
+    mine = hashlib.sha256(key.encode()).hexdigest()[:12]
+    for p in range(port, port + 30):
+        hub.port = p
+        try:
+            await hub.start()
+            if p != port:
+                print(f"  (port {port} is busy, so EdgeMesh is using port {p})")
+            return True
+        except OSError as e:
+            if e.errno not in PORT_TAKEN and getattr(e, "winerror", None) not in PORT_TAKEN:
+                raise
+        other = await _edgemesh_on(p)
+        if other and other.get("mesh") == mine:
+            link = f"http://127.0.0.1:{p}/?k={key}"
+            print(f"\nEdgeMesh is already running on this computer (port {p}). Opening it: {link}")
+            print("To restart it, close the other EdgeMesh window first.")
+            try:
+                webbrowser.open(link)
+            except Exception:
+                pass
+            return False
+    sys.exit(f"Ports {port}-{port + 29} are all in use. Pick another with: edgemesh host --port 9000")
+
+
 async def cmd_host(args) -> None:
     from .hub import Hub
 
@@ -162,7 +207,8 @@ async def cmd_host(args) -> None:
     except (ValueError, PermissionError, FileNotFoundError) as e:
         sys.exit(f"could not load model: {e}")
     hub = Hub(key, args.bind, args.port, source, str(HOME / "models"), token)
-    await hub.start()
+    if not await _start_on_free_port(hub, key, args.port):
+        return
     hub.lan_origin = f"http://{_lan_ip()}:{hub.port}"
     lan = f"{hub.lan_origin}/?k={key}"
     tunnel = None
