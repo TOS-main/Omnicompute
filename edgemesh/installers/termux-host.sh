@@ -62,7 +62,8 @@ fi
 pip install --quiet --disable-pip-version-check --no-deps --upgrade "$SRC"
 [ "$MODE" = "host" ] && [ -n "$KEY" ] && printf "%s" "$KEY" > "$DIR/mesh.key"  # same key: links keep working
 echo "$COMPUTE" > "$DIR/termux-compute"
-[ "$MODE" = "contribute" ] && printf "%s/contribute?c=%s" "$HUB" "$KEY" > "$DIR/termux-join"
+if [ "$MODE" = "contribute" ]; then printf "%s/contribute?c=%s" "$HUB" "$KEY" > "$DIR/termux-join"
+else rm -f "$DIR/termux-join"; fi  # hosting replaces an earlier contribute setup
 
 BIN="$PREFIX/bin"
 cat > "$BIN/edgemesh-host" <<'RUN'
