@@ -196,3 +196,7 @@ details.more > summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
   background: transparent; border: 0; padding: 6px 8px; color: inherit; cursor: pointer; }
 .chattitle { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chatitem .ghost.small { padding: 2px 6px; }
+
+.sharerow { margin-bottom: 10px; }
+.sharerow p { margin: 0 0 4px; }
+.sharerow input { flex: 1; min-width: 0; }

@@ -576,6 +576,7 @@ class Hub:
             "model": o.cfg if o else None,
             "lan_origin": self.lan_origin,
             "public_origin": self.public_origin,
+            "pages": project.PAGES,
             "contribute_key": self.contribute_key,
             "chat_version": self.chat_version,
             "capacity": _capacity([c.info for c in self.clients.values()]),

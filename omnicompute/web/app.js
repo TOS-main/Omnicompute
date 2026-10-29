@@ -55,6 +55,7 @@ async function refreshStatus() {
   renderDevices();
   applyModel(s.model);
   state.ckey = s.contribute_key;
+  drawShareLinks(s);
   if (s.public_origin) setJoin(s.public_origin); // works from any network
   else if (s.lan_origin && /^(localhost|127\.)/.test(location.hostname)) setJoin(s.lan_origin);
   else setJoin(location.origin);
@@ -713,6 +714,24 @@ function setJoin(origin) {
   const port = new URL(origin).port || (origin.startsWith("https") ? "443" : "80");
   $("port").textContent = $("port2").textContent = port;
   for (const e of document.querySelectorAll(".portv")) e.textContent = port;
+}
+// Every link this mesh can be reached by. The home-network one appears only on the host itself:
+// it is never published anywhere else (see beacon.py).
+const onHost = /^(localhost|127\.|\[::1\])/.test(location.hostname);
+function drawShareLinks(s) {
+  if (!state.ckey) return;
+  const rows = [];
+  if (s.pages && s.public_origin) rows.push(["Permanent (any network, never changes)", `${s.pages}/go.html#c=${state.ckey}`]);
+  if (s.public_origin) rows.push(["Cloud (any network, changes when the host restarts)", `${s.public_origin}/contribute?c=${state.ckey}`]);
+  if (s.lan_origin && onHost) rows.push(["Same Wi-Fi only (fastest, shown only on this computer)", `${s.lan_origin}/contribute?c=${state.ckey}`]);
+  const sig = JSON.stringify(rows);
+  if (drawShareLinks.last === sig) return;
+  drawShareLinks.last = sig;
+  fill($("sharelinks"), rows.length ? rows.map(([label, url], i) => el("div", { class: "sharerow" },
+    el("p", { class: "small" }, el("b", {}, label)),
+    el("div", { class: "row" }, el("input", { id: `share${i}`, readonly: "", value: url }),
+      el("button", { type: "button", "data-copyfrom": `share${i}` }, "Copy"))))
+    : el("p", { class: "muted small" }, "Start the host with --public for a link that works from other networks."));
 }
 for (const b of document.querySelectorAll("#linkkind button")) b.onclick = () => { joinView = b.dataset.kind; store.set("joinview", joinView); setJoin.last = null; refreshStatus(); };
 document.addEventListener("click", async (e) => {
