@@ -109,6 +109,10 @@ class Hub:
         self.removed: set[str] = set()  # device names taken off the mesh (refused until restart)
         self.chat: list[dict] = []  # the shared conversation every controller sees
         self.chat_version = 0
+        from .chats import ChatHistory
+
+        self.history = ChatHistory(self.loader.cache.parent / "chats.json")
+        self.chat_id = os.urandom(6).hex()
         self._runner = None
         self._udp = None
 
@@ -138,6 +142,10 @@ class Hub:
             web.post("/api/models/upload", self._upload_model),
             web.get("/api/chat", self._chat_get),
             web.post("/api/chat/clear", self._chat_clear),
+            web.get("/api/chats", self._chats),
+            web.post("/api/chats/open", self._chats_open),
+            web.post("/api/chats/rename", self._chats_rename),
+            web.delete("/api/chats", self._chats_delete),
             web.get("/ws", self._ws),
             web.get("/api/status", self._status),
             web.post("/api/generate", self._generate),
@@ -411,14 +419,55 @@ class Hub:
     async def _chat_get(self, request: web.Request) -> web.Response:
         if not self._authorized(request):
             raise web.HTTPUnauthorized(text="wrong mesh key")
-        return web.json_response({"version": self.chat_version, "messages": self.chat})
+        return web.json_response({"version": self.chat_version, "messages": self.chat, "id": self.chat_id})
 
     async def _chat_clear(self, request: web.Request) -> web.Response:
+        """New chat: the open one stays in the history."""
         if not self._authorized(request):
             raise web.HTTPUnauthorized(text="wrong mesh key")
-        self.chat = []
+        self.history.keep(self.chat_id, self.chat)
+        self.chat, self.chat_id = [], os.urandom(6).hex()
         self.chat_version += 1
         return web.json_response({"version": self.chat_version})
+
+    async def _chats(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        self.history.keep(self.chat_id, self.chat)
+        return web.json_response({"chats": self.history.listing(request.query.get("q", "")), "open": self.chat_id})
+
+    async def _chats_open(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        chat_id = str((await request.json()).get("id", ""))
+        if chat_id not in self.history.chats:
+            raise web.HTTPNotFound(text="no such chat")
+        if any(m.get("live") for m in self.chat):
+            raise web.HTTPConflict(text="an answer is still being written; wait for it or press Stop")
+        self.history.keep(self.chat_id, self.chat)
+        self.chat, self.chat_id = self.history.messages(chat_id), chat_id
+        self.chat_version += 1
+        return web.json_response({"version": self.chat_version})
+
+    async def _chats_rename(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        body = await request.json()
+        self.history.keep(self.chat_id, self.chat)
+        if str(body.get("id")) not in self.history.chats:
+            raise web.HTTPNotFound(text="no such chat")
+        self.history.rename(str(body["id"]), str(body.get("title", "")))
+        return web.json_response({"ok": True})
+
+    async def _chats_delete(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        chat_id = request.query.get("id", "")
+        self.history.delete(chat_id)
+        if chat_id == self.chat_id:
+            self.chat, self.chat_id = [], os.urandom(6).hex()
+            self.chat_version += 1
+        return web.json_response({"ok": True})
 
     async def _static(self, request: web.Request) -> web.Response:
         name = request.match_info["name"]
@@ -577,6 +626,8 @@ class Hub:
                 if reply is not None and reply.pop("live", None):
                     reply["stopped"] = True
                     self.chat_version += 1
+                if reply is not None and reply in self.chat:
+                    self.history.keep(self.chat_id, self.chat)
         except ConnectionResetError:
             log.info("client stopped the generation")
             return resp

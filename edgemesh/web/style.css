@@ -185,3 +185,14 @@ details.more { margin: 6px 0; }
 details.more > summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
 .bad-text { color: var(--bad, #e5484d); }
 .cores button.on { border-color: var(--accent, #6aa0ff); color: var(--accent, #6aa0ff); font-weight: 600; }
+
+/* saved chats */
+.chattools { gap: 6px; margin: 8px 0; flex-wrap: nowrap; }
+.chattools input { flex: 1; min-width: 0; }
+.chatlist { max-height: 260px; overflow-y: auto; margin-bottom: 14px; display: flex; flex-direction: column; gap: 2px; }
+.chatitem { display: flex; align-items: center; gap: 2px; border-radius: 8px; }
+.chatitem.open { background: var(--line); }
+.chatopen { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; text-align: left;
+  background: transparent; border: 0; padding: 6px 8px; color: inherit; cursor: pointer; }
+.chattitle { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chatitem .ghost.small { padding: 2px 6px; }

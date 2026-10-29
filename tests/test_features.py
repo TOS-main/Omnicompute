@@ -577,3 +577,21 @@ def test_cpu_and_gpu_split_each_matrix(monkeypatch):
     assert store.limits["use_cpu"] and wk.engines() == ("cpu", 1.0)
     store.limits = L.validate({"cpu": 10, "gpu_limit": 100})  # a small CPU share isn't worth splitting
     assert wk.engines() == ("gpu", 0.0)
+
+
+def test_chat_history_keeps_searches_and_reopens_chats(tmp_path):
+    from edgemesh.chats import ChatHistory
+
+    h = ChatHistory(tmp_path / "chats.json")
+    h.keep("a", [{"role": "user", "content": "How do tides work?"}, {"role": "assistant", "content": "The moon", "live": True}])
+    h.keep("b", [{"role": "user", "content": "Write a haiku"}])
+    h.keep("c", [])  # empty chats are not kept
+    h.rename("b", "Poems")
+    again = ChatHistory(tmp_path / "chats.json")
+    assert {c["title"] for c in again.listing()} == {"How do tides work?", "Poems"}
+    assert [c["id"] for c in again.listing("moon")] == ["a"]
+    assert "live" not in again.messages("a")[1]
+    again.keep("b", [{"role": "user", "content": "Write a haiku"}, {"role": "assistant", "content": "..."}])
+    assert again.chats["b"]["title"] == "Poems"  # a renamed chat keeps its name
+    again.delete("a")
+    assert [c["id"] for c in ChatHistory(tmp_path / "chats.json").listing()] == ["b"]

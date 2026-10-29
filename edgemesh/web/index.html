@@ -60,7 +60,16 @@
       </div>
 
       <aside id="settings" class="chat-side">
-        <div class="side-head"><h3>Generation</h3><button id="newchat" class="ghost small">New chat</button></div>
+        <div class="side-head"><h3>Chats</h3><button id="newchat" class="ghost small">New chat</button></div>
+        <div class="row chattools">
+          <input id="chatsearch" type="search" placeholder="Search chats" autocomplete="off">
+          <select id="chatsort" aria-label="Sort chats">
+            <option value="updated">Newest</option><option value="oldest">Oldest</option>
+            <option value="title">A–Z</option><option value="count">Longest</option>
+          </select>
+        </div>
+        <div id="chatlist" class="chatlist"></div>
+        <div class="side-head"><h3>Generation</h3></div>
         <label class="field">System prompt
           <textarea id="system" rows="3"></textarea>
         </label>

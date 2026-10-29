@@ -58,7 +58,7 @@ async function refreshStatus() {
   if (s.public_origin) setJoin(s.public_origin); // works from any network
   else if (s.lan_origin && /^(localhost|127\.)/.test(location.hostname)) setJoin(s.lan_origin);
   else setJoin(location.origin);
-  if (s.chat_version !== state.chatVersion && !state.generating) loadChat();
+  if (s.chat_version !== state.chatVersion && !state.generating) { loadChat(); refreshChats(); }
   drawCapacity(s.capacity);
   return true;
 }
@@ -457,7 +457,7 @@ async function send(text) {
     if (e.name === "AbortError") reply.meta = `stopped · ${tokens} tokens`;
     else reply.meta = `error: ${e.message}`;
   } finally {
-    state.generating = null;
+    state.generating = null; refreshChats();
     $("send").textContent = "Send";
     $("send").classList.remove("stop");
     store.set("ctxuse", lastCtxUse);
@@ -486,7 +486,48 @@ $("newchat").onclick = async () => {
   if (state.generating) state.generating.abort();
   chat = []; lastCtxUse = 0; store.set("ctxuse", 0); renderChat(); updateCtxMeter();
   try { await api("/api/chat/clear", { method: "POST" }); } catch { /* offline */ }
+  refreshChats();
 };
+
+// Saved chats on the main device: search, sort, reopen, rename, delete
+$("chatsort").value = store.get("chatsort", "updated");
+$("chatsort").onchange = () => { store.set("chatsort", $("chatsort").value); refreshChats(); };
+$("chatsearch").oninput = () => { clearTimeout(refreshChats.t); refreshChats.t = setTimeout(refreshChats, 250); };
+const whenText = (t) => {
+  const d = new Date(t * 1000), now = new Date();
+  return d.toDateString() === now.toDateString() ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString();
+};
+async function refreshChats() {
+  let r;
+  try { r = await (await api(`/api/chats?q=${encodeURIComponent($("chatsearch").value)}`)).json(); } catch { return; }
+  const by = $("chatsort").value, list = r.chats;
+  const cmp = { updated: (a, b) => b.updated - a.updated, oldest: (a, b) => a.created - b.created,
+    title: (a, b) => a.title.localeCompare(b.title), count: (a, b) => b.count - a.count }[by];
+  list.sort(cmp);
+  fill($("chatlist"), list.length ? list.map((c) => el("div", { class: "chatitem" + (c.id === r.open ? " open" : "") },
+    el("button", { class: "chatopen", type: "button", title: c.title, onclick: () => openChat(c.id) },
+      el("span", { class: "chattitle" }, c.title), el("span", { class: "muted small" }, `${whenText(c.updated)} · ${c.count} messages`)),
+    el("button", { class: "ghost small", type: "button", title: "Rename", "aria-label": "Rename", onclick: () => renameChat(c) }, "✎"),
+    el("button", { class: "ghost small danger", type: "button", title: "Delete", "aria-label": "Delete", onclick: () => deleteChat(c) }, "×")))
+    : el("p", { class: "muted small" }, $("chatsearch").value ? "No chats match." : "Your chats show up here."));
+}
+async function openChat(id) {
+  if (state.generating) return;
+  const r = await api("/api/chats/open", { method: "POST", body: JSON.stringify({ id }) });
+  if (!r.ok) { alert(await r.text()); return; }
+  await loadChat(); refreshChats();
+}
+async function renameChat(c) {
+  const title = prompt("Rename chat", c.title);
+  if (title == null) return;
+  await api("/api/chats/rename", { method: "POST", body: JSON.stringify({ id: c.id, title }) });
+  refreshChats();
+}
+async function deleteChat(c) {
+  if (!confirm(`Delete "${c.title}"?`)) return;
+  await api(`/api/chats?id=${encodeURIComponent(c.id)}`, { method: "DELETE" });
+  await loadChat(); refreshChats();
+}
 
 // ================================================================ model page
 
@@ -726,7 +767,7 @@ async function init() {
   state.poll = setInterval(refreshStatus, 2500);
   refreshModelInfo();
   refreshDownloaded();
-  loadChat();
+  loadChat(); refreshChats();
   if (store.get("mode", "controller") === "worker") setMode("worker");
 }
 
