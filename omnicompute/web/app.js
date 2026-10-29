@@ -284,6 +284,31 @@ function bindSetting(id, keyName, fmt, parse = Number) {
   show();
 }
 bindSetting("system", "system", () => "", String);
+
+// ready-made system prompts (and temperatures) for different kinds of work
+const MODES = {
+  chat: { label: "Chat", temp: 0.7, hint: "Friendly, natural conversation.",
+    system: "You are a friendly, helpful assistant. Talk naturally, keep answers clear and to the point, and ask a short question when something is unclear." },
+  code: { label: "Coding", temp: 0.2, hint: "Exact, working code with short explanations.",
+    system: "You are an expert software engineer. Write correct, complete, idiomatic code in fenced code blocks with the language named. Explain briefly what it does and why, point out edge cases and bugs, and prefer simple solutions. Don't invent APIs; say when you are unsure." },
+  math: { label: "Math", temp: 0.1, hint: "Step-by-step working, checked answers.",
+    system: "You are a careful mathematician. Solve problems step by step, showing each step of the working, and check the result before giving it. Put the final answer on its own line, starting with \"Answer:\". Use plain notation (x^2, sqrt(x), a/b) unless asked for LaTeX." },
+  write: { label: "Writing", temp: 0.9, hint: "Creative, well-structured prose.",
+    system: "You are a skilled writer and editor. Write vivid, well-structured text in the tone the user asks for, vary sentence length, avoid clichés, and when editing keep the author's voice." },
+};
+function drawModes() {
+  const cur = Object.keys(MODES).find((k) => MODES[k].system === settings.system) || "custom";
+  fill($("modes"), [...Object.entries(MODES), ["custom", { label: "Custom" }]].map(([k, m]) =>
+    el("button", { type: "button", class: k === cur ? "active" : "", title: m.hint || "your own system prompt", onclick: () => {
+      if (k === "custom") { $("system").focus(); return; }
+      settings.system = m.system; settings.temp = m.temp;
+      $("system").value = m.system; $("temp").value = m.temp; $("temp").dispatchEvent(new Event("input"));
+      saveSettings(); drawModes();
+    } }, m.label)));
+  $("mode-hint").textContent = cur === "custom" ? "Your own system prompt." : MODES[cur].hint;
+}
+$("system").addEventListener("input", drawModes);
+drawModes();
 bindSetting("maxnew", "maxnew", (v) => `${v} tokens`);
 bindSetting("ctx", "ctx", (v) => `${v} tokens`);
 bindSetting("temp", "temp", (v) => (v === 0 ? "0 (greedy)" : v.toFixed(2)));
