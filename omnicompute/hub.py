@@ -297,11 +297,16 @@ class Hub:
                 self.orchestrator.loaded.pop(client.node_id, None)  # CPU/GPU switched: send its layers again
             client.info.update({k: v for k, v in fields.items() if k in INFO_FIELDS})
         elif kind == "list":
-            peers = [{"node_id": c.node_id, "info": c.info} for c in self.clients.values() if c is not client]
+            hide = ("local_candidates",) if client.contributor else ()  # helpers never see addresses
+            peers = [{"node_id": c.node_id, "info": {k: v for k, v in c.info.items() if k not in hide}}
+                     for c in self.clients.values() if c is not client]
             await client.send({"type": "peers", "req": header.get("req"), "peers": peers})
         elif kind == "connect":
             target = self.clients.get(header.get("peer"))
-            if target is None or not (target.native and client.native and target.info.get("direct", True)):
+            # direct paths swap public IP addresses, so only the owner's own devices use them;
+            # helpers (contribute-only) always go through the relay and never learn anyone's IP
+            if target is None or client.contributor or target.contributor or \
+                    not (target.native and client.native and target.info.get("direct", True)):
                 await client.send({"type": "punch", "peer": header.get("peer"), "error": "peer cannot punch"})
                 return
             await target.send({"type": "punch", "peer": client.node_id, "candidates": _candidates(client)})

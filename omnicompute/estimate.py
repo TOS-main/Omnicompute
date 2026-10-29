@@ -40,8 +40,8 @@ def score_plan(cfg: dict, plan: list, by_id: dict) -> dict:
     net_ms = hub_leg(by_id[plan[0][0]]) + hub_leg(by_id[plan[-1][0]])
     for (a, _, _), (b, _, _) in zip(plan, plan[1:]):
         wa, wb = by_id[a], by_id[b]
-        direct = (wa.get("kind") == "native" and wb.get("kind") == "native"
-                  and wa.get("direct", True) and wb.get("direct", True))
+        direct = (wa.get("kind") == "native" and wb.get("kind") == "native" and not wa.get("contributor")
+                  and not wb.get("contributor") and wa.get("direct", True) and wb.get("direct", True))
         net_ms += DIRECT_HOP_MS if direct else hub_leg(wa) + hub_leg(wb)
     total = compute_s + net_ms / 1000
     return {"tok_per_s": round(1 / total, 2), "compute_ms": round(compute_s * 1000, 1),

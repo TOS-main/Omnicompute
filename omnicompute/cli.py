@@ -301,7 +301,8 @@ async def cmd_host(args) -> None:
     print(f"  Model: {hub.orchestrator.cfg.get('name')} ({hub.orchestrator.cfg['n_layer']} layers). "
           "Load another from Hugging Face on the web page.\n", flush=True)
     tasks = []
-    publisher = beacon.Publisher(key, lambda: {"url": hub.public_origin or hub.lan_origin, "lan": hub.lan_origin})
+    # only the cloud (tunnel) address is published, never this computer's home-network address
+    publisher = beacon.Publisher(key, lambda: {"url": hub.public_origin} if hub.public_origin else {})
     publisher.start()
     tasks.append(asyncio.ensure_future(_keep_addresses(hub, args, tunnel)))
     if not args.no_worker:

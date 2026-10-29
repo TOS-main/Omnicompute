@@ -56,7 +56,7 @@ async def test_contributor_joins_computes_but_gets_no_admin(model_file):
         events, ids = await collect(hub, "hello", 8)
         assert [p[0] for p in events[0]["plan"]] == ["owner", "friend"]
         assert ids == reference(cfg, w, "hello", 8)
-        assert friend.path_to("owner") == "direct"  # contributors still hole-punch with the others
+        assert friend.path_to("owner") == "relay"  # helpers never get anyone's IP address
         # each device's part in the answer
         contrib = events[-1]["stats"]["contribution"]
         assert {c["node_id"] for c in contrib} == {"owner", "friend"} and abs(sum(c["share"] for c in contrib) - 100) < 1
