@@ -25,6 +25,7 @@ import time
 import numpy as np
 
 from . import limits as L
+from .gpu import GPUMismatch
 from .model import Shard
 from .protocol import decode_tensors, encode_tensors
 
@@ -88,6 +89,8 @@ class Worker:
         self.steps = 0
         self.helped = {"answers": 0, "tokens": 0, "compute_s": 0.0}
         self.power = L.power_state()
+        self.gpu_broken = False
+        self._busy = asyncio.Lock()  # load and forward never overlap
         self.on_uninstall = None  # set by the CLI: what "Remove device" on the main computer does
         self._reported = None
 
@@ -102,7 +105,8 @@ class Worker:
         limits = self.limits.limits if self.limits else L.DEFAULT
         info = self.node.info if self.node else {}
         faster = info.get("gpu", {}).get("score", 0) > info.get("cpu_score", 0)
-        return self.gpu is not None and limits.get("gpu", True) and (faster or os.environ.get("EDGEMESH_GPU") == "force")
+        return (self.gpu is not None and not self.gpu_broken and limits.get("gpu", True)
+                and (faster or os.environ.get("EDGEMESH_GPU") == "force"))
 
     def limit_info(self) -> dict:
         limits = self.limits.limits if self.limits else dict(L.DEFAULT)
@@ -137,20 +141,8 @@ class Worker:
         if op in CONTROL_OPS and peer_id != "hub":
             raise PermissionError(f"{op} is only accepted from the hub")
         if op == "load":
-            self.shards = {}
-            if self.gpu is not None:
-                self.gpu.clear()
-            t = decode_tensors(payload)
-            gpu = self.use_gpu()
-            if not gpu:  # weights travel as float16; expand once so every step runs on fast float32 BLAS
-                t = {k: v.astype(np.float32) if v.dtype == np.float16 else v for k, v in t.items()}
-            shard = Shard(header["cfg"], t, header["start"], header["end"])
-            if gpu:
-                await asyncio.to_thread(shard.use_gpu, self.gpu)
-            self.shards = {header["model"]: shard}
-            log.info("loaded %s layers %d-%d on the %s", header["model"], header["start"], header["end"],
-                     f"GPU ({self.gpu.name})" if gpu else "CPU")
-            return {"ok": True}, b""
+            async with self._busy:
+                return await self._load(header, payload)
         if op == "uninstall":  # the main computer removed this device from the mesh
             if self.on_uninstall is None:
                 raise RuntimeError("this device can't uninstall itself")
@@ -189,6 +181,34 @@ class Worker:
             return {"shards": {m: [s.start, s.end] for m, s in self.shards.items()}}, b""
         raise ValueError(f"unknown op {op}")
 
+    async def _load(self, header: dict, payload: bytes):
+        if self.gpu is not None:
+            self.gpu.clear()
+        t = decode_tensors(payload)
+        gpu = self.use_gpu()
+
+        def on_cpu(t):  # weights travel as float16; expand once so every step runs on fast float32 BLAS
+            t = {k: v.astype(np.float32) if v.dtype == np.float16 else v for k, v in t.items()}
+            return Shard(header["cfg"], t, header["start"], header["end"])
+
+        if gpu:
+            shard = Shard(header["cfg"], dict(t), header["start"], header["end"])
+            try:
+                await asyncio.to_thread(shard.use_gpu, self.gpu)
+            except GPUMismatch as e:  # a GPU driver that computes wrong answers: never use it again
+                log.warning("the GPU gave wrong results (%s); using the CPU instead", e)
+                self.gpu_broken = True
+                self.gpu.clear()
+                gpu = False
+                shard = on_cpu(t)
+                await self.report_limits(force=True)
+        else:
+            shard = on_cpu(t)
+        self.shards = {header["model"]: shard}
+        log.info("loaded %s layers %d-%d on the %s", header["model"], header["start"], header["end"],
+                 f"GPU ({self.gpu.name})" if gpu else "CPU")
+        return {"ok": True}, b""
+
     async def _forward(self, h: dict, payload: bytes) -> None:
         try:
             hop = h["route"][h["hop"]]
@@ -200,7 +220,8 @@ class Worker:
             if cpu <= 0:
                 raise RuntimeError("paused by its usage limit")
             t0 = time.perf_counter()
-            y = await asyncio.to_thread(_limited, info["cores"], shard.forward, h["job"], decode_tensors(payload)["x"], h["pos"])
+            async with self._busy:
+                y = await asyncio.to_thread(_limited, info["cores"], shard.forward, h["job"], decode_tensors(payload)["x"], h["pos"])
             self.steps += 1
             busy = time.perf_counter() - t0
             h = {**h, "timings": h.get("timings", []) + [[self.node.node_id, round(busy, 5)]]}

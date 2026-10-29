@@ -49,6 +49,10 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
 CHUNK_BYTES = 120 << 20  # stay under the default 128 MB storage binding limit
 
 
+class GPUMismatch(RuntimeError):
+    pass
+
+
 class GPU:
     """Holds weight matrices on one GPU and multiplies activations by them."""
 
@@ -85,6 +89,11 @@ class GPU:
                                                       usage=self.wgpu.BufferUsage.STORAGE)
             chunks.append({"buf": buf, "c0": c0, "n2": part.shape[1] // 2})
         self.mats[name] = {"K": K, "N": N, "chunks": chunks}
+        # drivers differ: check one product against numpy before trusting this GPU with the matrix
+        x = np.sin(np.arange(K, dtype=np.float32) * 12.9898)[None] * 0.5
+        y, ref = self.mm_many(x, [name])[0][0], (x @ h[:, :N].astype(np.float32))[0]
+        if not np.all(np.isfinite(y)) or np.abs(y - ref).max() > 0.01 * max(np.abs(ref).max(), 1e-3) + 1e-3:
+            raise GPUMismatch(f"{self.name} gave wrong results for {name}")
 
     def has(self, name: str) -> bool:
         return name in self.mats

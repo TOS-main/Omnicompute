@@ -83,28 +83,61 @@ class Pool {
 let pool = null, cpuPool = null, gpuPool = null, cpuScore = 0, gpuScore = 0;
 
 // GPU on, allowed by the limits, and faster than the CPU cores
-const wantGpu = () => !!gpuPool && !gpuPool.lost && limits.gpu !== false && (gpuScore > cpuScore || (cfgStart && cfgStart.forceGpu));
+const wantGpu = () => !!gpuPool && !gpuPool.lost && !gpuBroken && limits.gpu !== false && (gpuScore > cpuScore || (cfgStart && cfgStart.forceGpu));
 
 // Move a shard's big matrices onto the pool (GPU or CPU cores); the main copy is dropped to save memory.
+// GPUs and drivers differ; after uploading a matrix, multiply a test vector on both the GPU and
+// the CPU and make sure they agree. Any mismatch => this device stays on the CPU.
+let gpuBroken = false;
+async function gpuAgrees(name, t, rows) {
+  const K = rows ? t.shape[1] : t.shape[0], N = rows ? t.shape[0] : t.shape[1];
+  const x = new Float32Array(K);
+  for (let i = 0; i < K; i++) x[i] = Math.sin(i * 12.9898) * 0.5;
+  const y = await gpuPool.mm(name, x, 1);
+  const n = rows ? Math.min(N, 64) : N;
+  let worst = 0, scale = 1e-3;
+  for (let j = 0; j < n; j++) {
+    let ref = 0;
+    if (rows) for (let k = 0; k < K; k++) ref += x[k] * t.data[j * K + k];
+    else for (let k = 0; k < K; k++) ref += x[k] * t.data[k * N + j];
+    worst = Math.max(worst, Math.abs(ref - y[j]));
+    scale = Math.max(scale, Math.abs(ref));
+  }
+  return Number.isFinite(worst) && worst <= 0.01 * scale + 1e-3;
+}
+
 async function distribute(shard) {
   if (gpuPool) await gpuPool.clear();
   if (cpuPool) await cpuPool.clear();
-  pool = wantGpu() ? gpuPool : cpuPool;
+  pool = wantGpu() && !gpuBroken ? gpuPool : cpuPool;
   stats.gpu = pool && pool === gpuPool ? gpuPool.name : null;
   if (!pool) return;
-  for (const [name, t] of Object.entries(shard.w)) {
-    if (t.shape.length === 2 && /\.w$|^lm_head$/.test(name)) {
-      await pool.putMatrix(name, t);
-      delete shard.w[name].data;
-    }
+  const big = Object.entries(shard.w).filter(([name, t]) => t.shape.length === 2 && /\.w$|^lm_head$/.test(name));
+  for (const [name, t] of big) {
+    await pool.putMatrix(name, t);
+    if (pool === gpuPool && !(await gpuAgrees(name, t, false))) return gpuFailed(shard, name);
   }
   const tied = shard.last && !shard.w["lm_head"] ? (shard.llama ? "embed" : "wte") : null;
   if (tied) {
     await pool.putRows(tied + "^T", shard.w[tied]);
-    if (!shard.first) shard.w[tied] = { shape: shard.w[tied].shape }; // only needed for the head
+    if (pool === gpuPool && !(await gpuAgrees(tied + "^T", shard.w[tied], true))) return gpuFailed(shard, tied);
   }
+  for (const [name] of big) delete shard.w[name].data; // the pool holds them now
+  if (tied && !shard.first) shard.w[tied] = { shape: shard.w[tied].shape }; // only needed for the head
   shard.pool = pool;
 }
+
+async function gpuFailed(shard, name) {
+  gpuBroken = true;
+  status("ready", { note: `this GPU gave wrong results (${name}); using the CPU instead` });
+  reportLimits(true);
+  return distribute(shard);
+}
+
+// load / forward / drop run one at a time, in arrival order, so a new model never replaces
+// weights while a step is still using them
+let opQueue = Promise.resolve();
+const SERIAL_OPS = new Set(["load", "forward", "drop"]);
 
 // ---- usage limits (same rules as edgemesh/limits.py) ----
 
@@ -267,9 +300,12 @@ function connect() {
       c.stop = true;
     } else if (h.type === "relay") {
       const [mh, mp] = unpackMsg(payload);
-      let res;
-      try { res = await handle(h.from, mh, mp); } catch (e) { res = [{ error: String(e.message || e) }, null]; }
-      if (mh.kind === "req" && res) sendTo(h.from, { ...res[0], rpc: mh.rpc, kind: "resp" }, res[1]);
+      const run = async () => {
+        let res;
+        try { res = await handle(h.from, mh, mp); } catch (e) { res = [{ error: String(e.message || e) }, null]; }
+        if (mh.kind === "req" && res) sendTo(h.from, { ...res[0], rpc: mh.rpc, kind: "resp" }, res[1]);
+      };
+      if (SERIAL_OPS.has(mh.op)) opQueue = opQueue.then(run, run); else run();
     }
   };
   ws.onclose = () => {

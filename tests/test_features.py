@@ -129,6 +129,37 @@ async def test_mesh_with_a_gpu_worker(model_file, monkeypatch):
         await hub.close()
 
 
+async def test_a_gpu_that_computes_wrong_falls_back_to_the_cpu(model_file, monkeypatch):
+    from edgemesh import gpu as G
+
+    gpu = _gpu()
+    if gpu is None:
+        pytest.skip("no WebGPU adapter")
+    monkeypatch.setenv("EDGEMESH_GPU", "force")
+
+    def bad_put(self, name, w):
+        raise G.GPUMismatch(f"{name}: off by 1e3")
+
+    monkeypatch.setattr(G.GPU, "put", bad_put)
+    path, cfg, w = model_file
+    hub, nodes = await start_mesh(path, [])
+    n = MeshNode("bad-gpu", KEY, f"http://127.0.0.1:{hub.port}",
+                 {"role": "worker", "kind": "native", "score": 3, "cpu_score": 1, "mem_mb": 1024,
+                  "gpu": {"name": gpu.name, "score": 3}})
+    worker = Worker(LimitStore(Path(tempfile.mkdtemp()) / "l.json", {"cpu": 100, "always": True}), gpu).attach(n)
+    await n.start()
+    try:
+        events, ids = await collect(hub, "gpu?", 8)
+        assert "bad-gpu" in [p[0] for p in events[0]["plan"]]
+        assert ids == reference(cfg, w, "gpu?", 8)  # right answer from the CPU
+        assert worker.gpu_broken and next(iter(worker.shards.values())).gpu is None
+    finally:
+        await n.close()
+        for x in nodes:
+            await x.close()
+        await hub.close()
+
+
 # ---------------------------------------------------------------- power limits
 
 
