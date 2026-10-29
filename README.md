@@ -113,6 +113,26 @@ downloads ahead of time.
 Rough sizes at float16: 0.5B params ≈ 1 GB, 1.5B ≈ 3 GB, 3B ≈ 6 GB, 7-8B ≈ 15 GB, spread across
 the devices. Browser workers need twice their share (they compute in float32).
 
+
+### GGUF files (LM Studio, llama.cpp)
+
+GGUF models load too: Q4_0/Q4_K/Q5_K/Q6_K/Q8_0/F16 and the rest that llama.cpp writes, for the
+Llama, Mistral, Qwen 2/3 and Phi-3 families. On the Models tab:
+
+- files in LM Studio's models folder on the main computer (`~/.lmstudio/models`) are listed under
+  Downloaded models with a Load button (more folders: `EDGEMESH_GGUF_DIRS`);
+- **Import a GGUF file** loads one by its path on the main computer, or uploads one from the device
+  you're on (in 32 MB pieces, so it works through the https link and resumes if it drops);
+- a Hugging Face repo that only has GGUF files downloads its Q4_K_M file, or the one you name:
+  `org/model:Q8_0`.
+
+The main computer expands each device's layers to float16 when it sends them, so devices
+compute exactly as with safetensors models. Models split into several GGUF files, Gemma and
+long-context (LongRoPE) Phi-3.5 aren't supported yet.
+
+Tokenizers: the main computer uses the `tokenizers` package when it is installed and EdgeMesh's
+own pure-Python BPE otherwise (so a phone in Termux can host), with the same tokens.
+
 ## How it works
 
 **Pipeline split by layers.** The hub measures each device (a quick matmul benchmark, plus how

@@ -559,13 +559,14 @@ async function refreshDownloaded() {
   if (!r.models.length) { fill(box, el("p", { class: "muted small" }, "Nothing downloaded yet. Models you load from Hugging Face are kept here.")); return; }
   const total = r.models.reduce((a, m) => a + m.bytes, 0);
   fill(box, el("table", { class: "models" }, r.models.map((m) => el("tr", {},
-    el("td", {}, el("b", {}, m.repo.split("/").pop()), el("div", { class: "muted small" }, m.repo)),
+    el("td", {}, el("b", {}, m.name || m.repo.split("/").pop()),
+      el("div", { class: "muted small" }, m.where ? `GGUF · ${m.where}` : m.format === "gguf" ? `${m.repo} · GGUF` : m.repo)),
     el("td", { class: "muted" }, gb(m.bytes)),
     el("td", { class: "actions" },
       m.loaded ? el("span", { class: "badge on" }, "loaded")
         : m.complete ? el("button", { class: "small", type: "button", onclick: () => loadRepo(m.repo) }, "Load")
         : el("span", { class: "badge relay", title: "the download did not finish; Load finishes it" }, "partial"),
-      !m.loaded ? el("button", { class: "small ghost danger", type: "button", onclick: () => uninstall(m.repo, m.bytes) }, "Uninstall") : null)))),
+      !m.loaded && m.removable !== false ? el("button", { class: "small ghost danger", type: "button", onclick: () => uninstall(m.name || m.repo, m.repo, m.bytes) }, "Uninstall") : null)))),
   el("p", { class: "muted small" }, `${gb(total)} used on the main computer's disk.`));
 }
 
@@ -575,8 +576,8 @@ async function loadRepo(repo) {
   refreshModelInfo();
 }
 
-async function uninstall(repo, bytes) {
-  if (!confirm(`Delete ${repo} from the main computer? This frees ${gb(bytes)}. You can download it again later.`)) return;
+async function uninstall(label, repo, bytes) {
+  if (!confirm(`Delete ${label} from the main computer? This frees ${gb(bytes)}. You can download it again later.`)) return;
   const r = await api(`/api/models?repo=${encodeURIComponent(repo)}`, { method: "DELETE" });
   if (!r.ok) alert(await r.text());
   refreshDownloaded();
@@ -594,6 +595,39 @@ function drawCapacity(c) {
     + "Generating a token reads every weight once (about 2 operations per parameter), so speed falls as models grow; network delay lowers it a bit more. "
     + "\"B\" = billion parameters, e.g. Qwen2.5-1.5B is 1.5B."));
 }
+
+$("ggform").onsubmit = (e) => {
+  e.preventDefault();
+  const p = $("ggpath").value.trim().replace(/^"|"$/g, "");
+  if (p) loadRepo(p.startsWith("gguf:") ? p : "gguf:" + p);
+};
+
+// Upload in 32 MB pieces: tunnels cap each request (Cloudflare at 100 MB), and a dropped
+// connection resumes from what the main computer already has.
+$("ggup").onclick = async () => {
+  const f = $("ggfile").files[0];
+  if (!f) { $("ggfile").click(); return; }
+  const PIECE = 32 << 20, show = (t, cls = "muted small") => { $("up").hidden = false; $("uptext").className = cls; $("uptext").textContent = t; };
+  let off = 0, tries = 0;
+  $("ggup").disabled = true;
+  try {
+    while (off < f.size || off === 0) {
+      const end = Math.min(f.size, off + PIECE), last = end >= f.size;
+      const q = `name=${encodeURIComponent(f.name)}&offset=${off}${last ? "&done=1" : ""}`;
+      let r;
+      try { r = await api(`/api/models/upload?${q}`, { method: "POST", body: f.slice(off, end), headers: { "Content-Type": "application/octet-stream" } }); }
+      catch (e) { if (++tries > 5) throw e; await new Promise((ok) => setTimeout(ok, 2000)); continue; }
+      const j = await r.json();
+      if (r.status === 409) { off = j.have; continue; }
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      off = j.have; tries = 0;
+      $("upbar").style.width = `${(100 * off / f.size).toFixed(1)}%`;
+      show(`Uploaded ${gb(off)} of ${gb(f.size)}`);
+      if (last) { show(`${f.name} is on the main computer. Loading it…`); refreshDownloaded(); loadRepo(j.repo); break; }
+    }
+  } catch (e) { show(`Upload stopped: ${e.message}. Press Upload again to continue.`, "bad small"); }
+  $("ggup").disabled = false;
+};
 
 $("hfform").onsubmit = (e) => {
   e.preventDefault();

@@ -147,6 +147,8 @@ def rope_inv_freq(cfg: dict) -> np.ndarray:
     kind = rs.get("rope_type", rs.get("type"))
     if kind == "linear":
         inv = inv / rs["factor"]
+    elif kind == "freqs":  # per-frequency factors given directly (GGUF's rope_freqs tensor)
+        inv = inv / np.asarray(rs["factors"], np.float64)[: len(inv)]
     elif kind == "llama3":  # Llama 3.1+ long-context frequency scaling
         factor, lo, hi = rs["factor"], rs.get("low_freq_factor", 1.0), rs.get("high_freq_factor", 4.0)
         old = rs.get("original_max_position_embeddings", 8192)

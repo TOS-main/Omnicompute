@@ -26,6 +26,7 @@ from aiohttp import WSMsgType, web
 from cryptography.exceptions import InvalidTag
 
 from .crypto import MeshCipher, contribute_key
+from .hf import split_spec
 from .messenger import Messenger
 from .protocol import pack, unpack
 from .wsparts import Joiner, split
@@ -133,6 +134,7 @@ class Hub:
             web.get("/download/edgemesh.zip", self._package),
             web.get("/api/models", self._models),
             web.delete("/api/models", self._delete_model),
+            web.post("/api/models/upload", self._upload_model),
             web.get("/api/chat", self._chat_get),
             web.post("/api/chat/clear", self._chat_clear),
             web.get("/ws", self._ws),
@@ -355,6 +357,35 @@ class Hub:
         models = await asyncio.to_thread(downloaded, self.loader.cache)
         return web.json_response({"current": current, "models": [{**m, "loaded": m["repo"] == current} for m in models]})
 
+    async def _upload_model(self, request: web.Request) -> web.Response:
+        """POST ?name=x.gguf&offset=N[&done=1], body = the next piece of the file. Pieces keep each
+        request small enough for tunnels (Cloudflare allows 100 MB per request); a failed upload
+        resumes from the size the hub reports."""
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        name = Path(request.query.get("name", "")).name
+        if not name.lower().endswith(".gguf") or name.startswith("."):
+            raise web.HTTPBadRequest(text="only .gguf files can be uploaded")
+        folder = self.loader.cache / "gguf"
+        folder.mkdir(parents=True, exist_ok=True)
+        part = folder / (name + ".part")
+        have = part.stat().st_size if part.exists() else 0
+        offset = int(request.query.get("offset", "0"))
+        if offset == 0 and have:
+            part.unlink()
+            have = 0
+        if offset != have:
+            return web.json_response({"have": have}, status=409)
+        with open(part, "ab") as f:
+            async for chunk in request.content.iter_chunked(1 << 20):
+                f.write(chunk)
+        size = part.stat().st_size
+        if request.query.get("done") == "1":
+            target = folder / name
+            os.replace(part, target)
+            return web.json_response({"have": size, "repo": f"gguf:{target.resolve()}"})
+        return web.json_response({"have": size})
+
     async def _delete_model(self, request: web.Request) -> web.Response:
         if not self._authorized(request):
             raise web.HTTPUnauthorized(text="wrong mesh key")
@@ -416,7 +447,14 @@ class Hub:
         from .estimate import estimate
 
         repo = request.query.get("repo", "").strip().removeprefix("https://huggingface.co/").strip("/")
-        if repo:
+        if repo.startswith("gguf:"):
+            from .gguf_source import local_gguf_config
+
+            try:
+                cfg, disk = await asyncio.to_thread(local_gguf_config, repo[5:])
+            except (OSError, ValueError) as e:
+                return web.json_response({"problem": str(e)})
+        elif repo:
             from .hf import remote_config
 
             try:
@@ -561,8 +599,14 @@ class Hub:
             raise web.HTTPUnauthorized(text="wrong mesh key")
         body = await request.json()
         repo = str(body.get("repo", "")).strip().removeprefix("https://huggingface.co/").strip("/")
-        if repo.count("/") != 1:
-            raise web.HTTPBadRequest(text="use the Hugging Face repo id, like Qwen/Qwen2.5-0.5B-Instruct")
+        if repo.startswith("gguf:") or repo.lower().endswith(".gguf"):  # a GGUF file on this computer
+            path = Path(repo.removeprefix("gguf:").strip('"')).expanduser()
+            if path.suffix.lower() != ".gguf" or not path.is_file():
+                raise web.HTTPBadRequest(text=f"no .gguf file at {path} on the main computer")
+            repo = f"gguf:{path.resolve()}"
+        elif split_spec(repo)[0].count("/") != 1:
+            raise web.HTTPBadRequest(text="use the Hugging Face repo id, like Qwen/Qwen2.5-0.5B-Instruct, "
+                                          "or the path of a .gguf file on the main computer")
         loop = asyncio.get_running_loop()
 
         def ready(source):

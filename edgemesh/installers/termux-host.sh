@@ -42,17 +42,9 @@ export PIP_BREAK_SYSTEM_PACKAGES=1 AIOHTTP_NO_EXTENSIONS=1 MULTIDICT_NO_EXTENSIO
 echo "Installing Python and libraries (a few minutes)..."
 pkg update -y >/dev/null 2>&1 || true
 pkg install -y python python-numpy python-cryptography cloudflared unzip >/dev/null
-# tokenizers is compiled code: use Termux's package when there is one, otherwise build it once
-if ! python -c "import tokenizers" 2>/dev/null; then
-  pkg install -y python-tokenizers >/dev/null 2>&1 || true
-fi
-if ! python -c "import tokenizers" 2>/dev/null; then
-  echo "Building the tokenizer library (one time, can take 10-20 minutes; keep Termux open)..."
-  pkg install -y rust binutils >/dev/null
-  export ANDROID_API_LEVEL="$(getprop ro.build.version.sdk)"  # the Rust build tool needs it on Android
-  pip install tokenizers || echo "WARNING: the tokenizer library didn't build, so Hugging Face models won't load here yet."
-fi
-pip install --quiet --disable-pip-version-check aiohttp jinja2 segno threadpoolctl
+# the fast tokenizer library when Termux has it; otherwise EdgeMesh's own (no compiling needed)
+python -c "import tokenizers" 2>/dev/null || pkg install -y python-tokenizers >/dev/null 2>&1 || true
+pip install --quiet --disable-pip-version-check aiohttp jinja2 segno threadpoolctl gguf
 
 mkdir -p "$DIR"
 if [ -n "$HUB" ]; then

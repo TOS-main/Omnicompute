@@ -217,28 +217,69 @@ def list_repo_files(repo: str, token: str | None = None, revision: str = "main")
     return {i["path"]: (i.get("lfs") or {}).get("size", i.get("size", 0)) for i in items if i.get("type") == "file"}
 
 
+GGUF_PREFERENCE = ["Q4_K_M", "Q4_K_S", "Q5_K_M", "Q8_0", "Q6_K", "Q5_K_S", "Q4_0", "IQ4_XS", "Q3_K_L", "F16"]
+
+
+def split_spec(repo: str) -> tuple[str, str | None]:
+    """'org/name:Q8_0' -> ('org/name', 'Q8_0'): which file of a GGUF repo to use."""
+    name, _, want = repo.partition(":")
+    return name, want or None
+
+
+def pick_gguf(files: dict, want: str | None = None) -> str | None:
+    """The GGUF file to use from a repo: the asked-for quantization, else a good default."""
+    ggufs = [f for f in files if f.endswith(".gguf") and "mmproj" not in f.lower()]
+    if not ggufs:
+        return None
+    ggufs = [f for f in ggufs if "-of-" not in f or "00001-of-00001" in f]  # models split in parts: not yet
+    if not ggufs:
+        raise ValueError("this repo only has GGUF models split into several files, which EdgeMesh can't read yet")
+    for q in [want] if want else GGUF_PREFERENCE:
+        hit = [f for f in ggufs if q.lower() in f.lower()]
+        if hit:
+            return min(hit, key=len)
+    if want:
+        raise ValueError(f"no {want} file in this repo; files: {', '.join(f.split('/')[-1] for f in ggufs)}")
+    return min(ggufs, key=lambda f: files[f])
+
+
 def remote_config(repo: str, token: str | None = None) -> tuple[dict, int]:
     """(EdgeMesh config, total download size in bytes) without downloading the weights."""
+    repo, want = split_spec(repo)
     files = list_repo_files(repo, token)
     weights = [f for f in files if f.endswith(".safetensors")]
+    gg = None if weights else pick_gguf(files, want)
+    if gg:  # read just the start of the file, where GGUF keeps the model's settings
+        from .gguf_source import remote_gguf_config
+
+        return remote_gguf_config(lambda a, b: _range(f"{HF}/{repo}/resolve/main/{gg}", token, a, b), repo), files[gg]
     if not weights:
-        raise ValueError(f"{repo} has no .safetensors weights (only .bin or .gguf files)")
+        raise ValueError(f"{repo} has no .safetensors or .gguf weights (only .bin files)")
     with _request(f"{HF}/{repo}/resolve/main/config.json", token) as r:
         hf = json.load(r)
     size = sum(files[f] for f in weights + [m for m in META_FILES if m in files])
     return edgemesh_config(hf, repo), size
 
 
+def _range(url: str, token: str | None, start: int, end: int) -> bytes:
+    with _request(url, token, {"Range": f"bytes={start}-{end - 1}"}) as r:
+        return r.read(end - start)  # never the whole file, even if the server ignores the range
+
+
 def download(repo: str, dest_root: Path, token: str | None = None, progress: Download | None = None) -> Path:
     progress = progress or Download(repo)
+    repo, want = split_spec(repo)
     files = list_repo_files(repo, token)
     weights = [f for f in files if f.endswith(".safetensors")]
     if not weights:
-        raise ValueError(f"{repo} has no .safetensors weights (only .bin or .gguf files); "
-                         "pick a repo that ships safetensors")
-    if "config.json" not in files or "tokenizer.json" not in files:
+        gg = pick_gguf(files, want)
+        if gg is None:
+            raise ValueError(f"{repo} has no .safetensors or .gguf weights (only .bin files)")
+        wanted = [gg]  # a GGUF file carries its own config and tokenizer
+    elif "config.json" not in files or "tokenizer.json" not in files:
         raise ValueError(f"{repo} is missing config.json or tokenizer.json")
-    wanted = [f for f in META_FILES if f in files] + weights
+    else:
+        wanted = [f for f in META_FILES if f in files] + weights
     folder = dest_root / repo.replace("/", "--")
     folder.mkdir(parents=True, exist_ok=True)
     progress.total = sum(files[f] for f in wanted)
@@ -249,6 +290,7 @@ def download(repo: str, dest_root: Path, token: str | None = None, progress: Dow
         if target.exists() and target.stat().st_size == files[name]:
             continue
         progress.file = name
+        target.parent.mkdir(parents=True, exist_ok=True)
         part = target.with_suffix(target.suffix + ".part")
         have = part.stat().st_size if part.exists() else 0
         headers = {"Range": f"bytes={have}-"} if have else {}
@@ -264,8 +306,15 @@ def download(repo: str, dest_root: Path, token: str | None = None, progress: Dow
     return folder
 
 
+def _gguf_in(folder: Path) -> Path | None:
+    files = [f for f in folder.rglob("*.gguf") if "mmproj" not in f.name.lower()]
+    return min(files, key=lambda f: len(str(f))) if files else None
+
+
 def _complete(folder: Path) -> bool:
     """True when a downloaded model folder has everything needed to load it offline."""
+    if not (folder / "config.json").exists() and _gguf_in(folder) is not None:
+        return not any(f.suffix == ".part" for f in folder.rglob("*"))
     if not (folder / "config.json").exists() or not (folder / "tokenizer.json").exists():
         return False
     if any(f.suffix == ".part" for f in folder.iterdir()):
@@ -276,40 +325,79 @@ def _complete(folder: Path) -> bool:
     return any(folder.glob("*.safetensors"))
 
 
-def resolve(spec: str, cache: Path, token: str | None = None, progress: Download | None = None) -> HFSource:
-    """'hf:org/name', 'org/name' or a local folder -> HFSource (downloading if needed)."""
-    path = Path(spec.removeprefix("hf:")).expanduser()
-    if not spec.startswith("hf:") and path.is_dir():
-        return HFSource(path)
-    repo = spec.removeprefix("hf:")
-    local = cache / repo.replace("/", "--")
-    if local.is_dir() and _complete(local):  # already downloaded: no network needed
+def _open(folder: Path, name: str):
+    if not (folder / "config.json").exists() and _gguf_in(folder) is not None:
+        from .gguf_source import GGUFSource
+
+        return GGUFSource(_gguf_in(folder), name=name)
+    return HFSource(folder, name=name)
+
+
+def resolve(spec: str, cache: Path, token: str | None = None, progress: Download | None = None):
+    """'hf:org/name[:QUANT]', 'org/name', a local folder, or a .gguf file ('gguf:/path/x.gguf')
+    -> HFSource or GGUFSource (downloading if needed)."""
+    path = Path(spec.removeprefix("gguf:").removeprefix("hf:")).expanduser()
+    if (spec.startswith("gguf:") or path.suffix == ".gguf") and path.is_file():
+        from .gguf_source import GGUFSource
+
         if progress:
             progress.state = "loading"
-        return HFSource(local, name=repo)
+        return GGUFSource(path, name=f"gguf:{path}")
+    if spec.startswith("gguf:"):
+        raise FileNotFoundError(f"no GGUF file at {path}")
+    if not spec.startswith("hf:") and path.is_dir():
+        return _open(path, path.name)
+    repo = spec.removeprefix("hf:")
+    local = cache / split_spec(repo)[0].replace("/", "--")
+    if local.is_dir() and _complete(local) and (split_spec(repo)[1] is None or not (local / "config.json").exists()
+                                                and split_spec(repo)[1].lower() in str(_gguf_in(local)).lower()):
+        if progress:  # already downloaded: no network needed
+            progress.state = "loading"
+        return _open(local, repo)
     folder = download(repo, cache, token, progress)
     if progress:
         progress.state = "loading"
-    return HFSource(folder, name=repo)
+    return _open(folder, repo)
+
+
+def gguf_dirs(cache: Path) -> list[Path]:
+    """Folders searched for GGUF files: EdgeMesh's own (uploads, imports) and LM Studio's."""
+    from .gguf_source import lmstudio_dirs
+
+    extra = [Path(p).expanduser() for p in os.environ.get("EDGEMESH_GGUF_DIRS", "").split(os.pathsep) if p]
+    return [cache / "gguf", *lmstudio_dirs(), *extra]
 
 
 def downloaded(cache: Path) -> list[dict]:
-    """Models already on this computer: [{"repo", "bytes", "complete"}]."""
+    """Models already on this computer: [{"repo", "bytes", "complete"}], plus GGUF files found in
+    EdgeMesh's gguf folder and LM Studio's model folders ("repo" is then "gguf:<path>")."""
     out = []
-    if not cache.is_dir():
-        return out
-    for folder in sorted(cache.iterdir()):
-        if not folder.is_dir() or "--" not in folder.name:
-            continue
-        files = [f for f in folder.iterdir() if f.is_file()]
-        complete = _complete(folder)
-        out.append({"repo": folder.name.replace("--", "/", 1), "bytes": sum(f.stat().st_size for f in files),
-                    "complete": complete})
+    if cache.is_dir():
+        for folder in sorted(cache.iterdir()):
+            if not folder.is_dir() or "--" not in folder.name:
+                continue
+            files = [f for f in folder.rglob("*") if f.is_file()]
+            out.append({"repo": folder.name.replace("--", "/", 1), "bytes": sum(f.stat().st_size for f in files),
+                        "complete": _complete(folder), "format": "gguf" if _gguf_in(folder) else "safetensors"})
+    from .gguf_source import find_gguf
+
+    own = (cache / "gguf").resolve()
+    for f in find_gguf(gguf_dirs(cache)):
+        out.append({"repo": f"gguf:{f}", "name": f.name, "bytes": f.stat().st_size, "complete": True, "format": "gguf",
+                    "where": "uploaded" if own in f.resolve().parents else "LM Studio" if "lm" in str(f).lower() else str(f.parent),
+                    "removable": own in f.resolve().parents})
     return out
 
 
 def remove(cache: Path, repo: str) -> int:
     """Delete a downloaded model. Returns the bytes freed."""
+    if repo.startswith("gguf:"):  # only files EdgeMesh itself added; LM Studio's stay LM Studio's
+        f = Path(repo[5:]).resolve()
+        if (cache / "gguf").resolve() not in f.parents or not f.is_file():
+            raise FileNotFoundError("only GGUF files uploaded to EdgeMesh can be removed here")
+        size = f.stat().st_size
+        f.unlink()
+        return size
     folder = (cache / repo.replace("/", "--")).resolve()
     if folder.parent != cache.resolve() or not folder.is_dir():
         raise FileNotFoundError(f"{repo} is not downloaded")
@@ -335,7 +423,8 @@ class Loader:
         def run():
             t0 = time.monotonic()
             try:
-                src = resolve("hf:" + repo, self.cache, token or self.token, d)
+                spec = repo if repo.startswith("gguf:") else "hf:" + repo
+                src = resolve(spec, self.cache, token or self.token, d)
                 on_ready(src)
                 d.state = "ready"
                 log.info("%s ready in %.0fs", repo, time.monotonic() - t0)
