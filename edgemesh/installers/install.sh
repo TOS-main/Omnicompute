@@ -112,7 +112,7 @@ if command -v nvidia-smi >/dev/null 2>&1 && ! "$DIR/venv/bin/python" -c "import 
 fi
 
 if [ -z "$JOIN" ]; then
-  printf '#!/bin/sh\nexec "%s/venv/bin/python" -m edgemesh host --public %s "$@"\n' "$DIR" "${CORES:+--cores $CORES}" > "$DIR/edgemesh-host"
+  printf '#!/bin/sh\nexec "%s/venv/bin/python" -m edgemesh host --public %s "$@"\n' "$DIR" "${CORES:+--cores $CORES}${EDGEMESH_KEY:+ --key $EDGEMESH_KEY}" > "$DIR/edgemesh-host"
   chmod +x "$DIR/edgemesh-host"
   echo
   echo "Starting your mesh. Share the permanent contribute link it prints; it keeps working when"

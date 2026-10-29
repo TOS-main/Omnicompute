@@ -130,6 +130,7 @@ if ($nvidia) {
 
 $coreArgs = if ($n -gt 0) { @("--cores", "$n") } else { @() }
 if (-not $Join) {
+  if ($env:EDGEMESH_KEY) { $coreArgs = @("--key", $env:EDGEMESH_KEY) + $coreArgs }  # keep an existing mesh
   $exe = Join-Path $venv "Scripts\edgemesh.exe"
   $lnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "EdgeMesh host.lnk"
   try {
