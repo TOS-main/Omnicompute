@@ -101,6 +101,7 @@ class MainActivity : Activity() {
         menu.add(0, 3, 2, R.string.compute).setCheckable(true).isChecked = p.compute
         menu.add(0, 4, 3, R.string.boot).setCheckable(true).isChecked = p.startAtBoot
         menu.add(0, 5, 4, R.string.battery)
+        menu.add(0, 8, 5, R.string.connection)
         menu.add(0, 7, 5, R.string.use_key)
         menu.add(0, 6, 6, R.string.stop_hosting)
         return true
@@ -116,6 +117,7 @@ class MainActivity : Activity() {
             5 -> askBattery()
             6 -> { HostService.stop(this); finishAndRemoveTask() }
             7 -> askKey()
+            8 -> askConnection()
             else -> return super.onOptionsItemSelected(item)
         }
         return true
@@ -149,6 +151,27 @@ class MainActivity : Activity() {
                 if (why.isEmpty()) restart() else android.widget.Toast.makeText(this, why, android.widget.Toast.LENGTH_LONG).show()
             }
             .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** Cloudflare (any network, the default) or this phone's own address. */
+    private fun askConnection() {
+        val p = Prefs(this)
+        val choices = arrayOf(getString(R.string.conn_cloud), getString(R.string.conn_own))
+        android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.connection)
+            .setSingleChoiceItems(choices, if (p.ownIp) 1 else 0) { d, which ->
+                d.dismiss()
+                if (which == 0) { p.ownIp = false; restart(); return@setSingleChoiceItems }
+                val input = android.widget.EditText(this).apply { hint = "http://your-public-ip:8000 (optional)"; setSingleLine(); setText(p.ownUrl) }
+                android.app.AlertDialog.Builder(this)
+                    .setTitle(R.string.conn_own)
+                    .setMessage(R.string.conn_own_text)
+                    .setView(input)
+                    .setPositiveButton(android.R.string.ok) { _, _ -> p.ownIp = true; p.ownUrl = input.text.toString().trim(); restart() }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
             .show()
     }
 

@@ -112,7 +112,28 @@ if command -v nvidia-smi >/dev/null 2>&1 && ! "$DIR/venv/bin/python" -c "import 
 fi
 
 if [ -z "$JOIN" ]; then
-  printf '#!/bin/sh\nexec "%s/venv/bin/python" -m omnicompute host --public %s "$@"\n' "$DIR" "${CORES:+--cores $CORES}${OMNICOMPUTE_KEY:+ --key $OMNICOMPUTE_KEY}" > "$DIR/omnicompute-host"
+  # how other devices reach it: a Cloudflare tunnel (default) or this computer's own IP address
+  REACH="${OMNICOMPUTE_REACH:-}"
+  if [ -z "$REACH" ] && [ "${OMNICOMPUTE_YES:-}" != "1" ]; then
+    echo
+    echo "How should your other devices reach this computer?"
+    echo "  1) Cloudflare tunnel: works from any network, nothing to set up (recommended)"
+    echo "  2) This computer's own IP address: same Wi-Fi, or any network with port forwarding"
+    printf "Choose 1 or 2 [1]: "
+    { read -r r < /dev/tty; } 2>/dev/null || r=1
+    case "$r" in 2) REACH=own ;; *) REACH=cloud ;; esac
+  fi
+  NET="--public"
+  if [ "$REACH" = "own" ]; then
+    URL="${OMNICOMPUTE_PUBLIC_URL:-}"
+    if [ -z "$URL" ] && [ "${OMNICOMPUTE_YES:-}" != "1" ]; then
+      echo "For other networks, forward TCP and UDP port 8000 on your router to this computer and enter"
+      printf "your address, like http://your-public-ip:8000 (leave empty for same Wi-Fi only): "
+      { read -r URL < /dev/tty; } 2>/dev/null || URL=""
+    fi
+    NET="${URL:+--public-url $URL}"
+  fi
+  printf '#!/bin/sh\nexec "%s/venv/bin/python" -m omnicompute host %s %s "$@"\n' "$DIR" "$NET" "${CORES:+--cores $CORES}${OMNICOMPUTE_KEY:+ --key $OMNICOMPUTE_KEY}" > "$DIR/omnicompute-host"
   chmod +x "$DIR/omnicompute-host"
   echo
   echo "Starting your mesh. Share the permanent contribute link it prints; it keeps working when"

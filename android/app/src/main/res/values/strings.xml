@@ -11,6 +11,10 @@
     <string name="boot">Start when the phone starts</string>
     <string name="battery">Don\'t let Android pause it</string>
     <string name="stop_hosting">Stop hosting</string>
+    <string name="connection">How devices reach this phone</string>
+    <string name="conn_cloud">Cloudflare tunnel (any network, recommended)</string>
+    <string name="conn_own">This phone\'s own IP address</string>
+    <string name="conn_own_text">Devices on the same Wi-Fi connect straight to this phone. For other networks, forward TCP and UDP port 8000 on your router to this phone and enter http://your-public-ip:8000 here. Leave it empty for Wi-Fi only.</string>
     <string name="use_key">Use an existing mesh key</string>
     <string name="use_key_text">Paste the mesh key (or full link) of a mesh you already run, and this phone takes over hosting it. Your links and devices keep working.</string>
     <string name="starting">Starting Omnicompute…</string>

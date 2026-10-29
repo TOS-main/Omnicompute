@@ -18,9 +18,11 @@ _state: dict = {"thread": None, "loop": None, "task": None, "error": None}
 
 
 def start(home: str, cloudflared: str = "", compute: bool = False, cores: int = 0, port: int = PORT,
-          public: bool = True) -> None:
+          public: bool = True, public_url: str = "") -> None:
     """Start hosting (no-op while it already runs). compute=True also runs layers on the phone,
-    capped at 50% so coordinating stays quick; cores=0 means all of them."""
+    capped at 50% so coordinating stays quick; cores=0 means all of them. public=False hosts on
+    the phone's own address instead of a Cloudflare tunnel: same Wi-Fi only, or from anywhere
+    through public_url (e.g. http://your-ip:8000 with the port forwarded on the router)."""
     if _state["thread"] and _state["thread"].is_alive():
         return
     os.environ["OMNICOMPUTE_HOME"] = str(Path(home) / ".omnicompute")
@@ -35,7 +37,8 @@ def start(home: str, cloudflared: str = "", compute: bool = False, cores: int = 
 
     from . import cli
 
-    argv = ["host", "--port", str(port)] + (["--public"] if public else [])
+    argv = ["host", "--port", str(port)] + (["--public-url", public_url] if public_url.strip() and not public
+                                             else ["--public"] if public else [])
     if compute:
         argv += ["--cpu", "50"] + (["--cores", str(cores)] if cores else [])
     else:

@@ -47,7 +47,8 @@ class HostService : Service() {
         val prefs = Prefs(this)
         Thread {
             py(this).getModule("omnicompute.android").callAttr(
-                "start", filesDir.absolutePath, cloudflared(this), prefs.compute, prefs.cores)
+                "start", filesDir.absolutePath, cloudflared(this), prefs.compute, prefs.cores, 8000,
+                !prefs.ownIp, prefs.ownUrl)
         }.start()
         return START_STICKY
     }

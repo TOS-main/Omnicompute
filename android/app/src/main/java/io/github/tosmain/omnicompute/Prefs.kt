@@ -18,6 +18,14 @@ class Prefs(context: Context) {
         get() = p.getBoolean("boot", true)
         set(v) = p.edit().putBoolean("boot", v).apply()
 
+    var ownIp: Boolean  // host on this phone's own address instead of a Cloudflare tunnel
+        get() = p.getBoolean("own_ip", false)
+        set(v) = p.edit().putBoolean("own_ip", v).apply()
+
+    var ownUrl: String  // with ownIp: an address from other networks (port forwarding), or "" for Wi-Fi only
+        get() = p.getString("own_url", "") ?: ""
+        set(v) = p.edit().putString("own_url", v).apply()
+
     var hosting: Boolean  // false after the user pressed Stop, so a reboot doesn't start it again
         get() = p.getBoolean("hosting", true)
         set(v) = p.edit().putBoolean("hosting", v).apply()

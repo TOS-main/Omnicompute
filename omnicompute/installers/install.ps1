@@ -131,16 +131,35 @@ if ($nvidia) {
 $coreArgs = if ($n -gt 0) { @("--cores", "$n") } else { @() }
 if (-not $Join) {
   if ($env:OMNICOMPUTE_KEY) { $coreArgs = @("--key", $env:OMNICOMPUTE_KEY) + $coreArgs }  # keep an existing mesh
+  # how other devices reach it: a Cloudflare tunnel (default) or this computer's own IP address
+  $reach = $env:OMNICOMPUTE_REACH
+  if (-not $reach -and $env:OMNICOMPUTE_YES -ne "1") {
+    Write-Host ""
+    Write-Host "How should your other devices reach this computer?"
+    Write-Host "  1) Cloudflare tunnel: works from any network, nothing to set up (recommended)"
+    Write-Host "  2) This computer's own IP address: same Wi-Fi, or any network with port forwarding"
+    $reach = if ((Read-Host "Choose 1 or 2 [1]") -eq "2") { "own" } else { "cloud" }
+  }
+  $netArgs = @("--public")
+  if ($reach -eq "own") {
+    $url = $env:OMNICOMPUTE_PUBLIC_URL
+    if (-not $url -and $env:OMNICOMPUTE_YES -ne "1") {
+      Write-Host "For other networks, forward TCP and UDP port 8000 on your router to this computer and enter"
+      $url = Read-Host "your address, like http://your-public-ip:8000 (leave empty for same Wi-Fi only)"
+    }
+    $netArgs = if ($url) { @("--public-url", $url.Trim()) } else { @() }
+  }
+  $coreArgs = $netArgs + $coreArgs
   $exe = Join-Path $venv "Scripts\omnicompute.exe"
   $lnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "Omnicompute host.lnk"
   try {
     $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
-    $s.TargetPath = $exe; $s.Arguments = (@("host", "--public") + $coreArgs) -join " "; $s.Save()
+    $s.TargetPath = $exe; $s.Arguments = (@("host") + $coreArgs) -join " "; $s.Save()
   } catch {}
   Write-Host ""
   Write-Host "Starting your mesh. Share the permanent contribute link it prints; it keeps working when"
   Write-Host "this computer's address changes. Close this window to stop."
-  & $exe host --public @coreArgs
+  & $exe host @coreArgs
   return
 }
 & $vpy -m omnicompute contribute $Join @coreArgs @awakeArgs
