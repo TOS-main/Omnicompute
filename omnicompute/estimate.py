@@ -17,7 +17,7 @@ DEFAULT_RTT_MS = 40.0
 
 def usable_workers(workers: list[dict], cfg: dict | None = None) -> list[dict]:
     """Workers that may get layers, with their speed scaled by their usage limit. Models the
-    browser worker can't run yet (cfg "native_only", e.g. Gemma 4) use apps and computers only."""
+    browser worker can't run (cfg "native_only") use apps and computers only."""
     native_only = bool(cfg and cfg.get("native_only"))
     return [dict(w, score=w.get("score", 1.0) * w.get("limit", 100) / 100) for w in workers
             if w.get("role", "worker") == "worker" and w.get("limit", 100) > 0

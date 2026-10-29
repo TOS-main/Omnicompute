@@ -83,7 +83,7 @@ def _gemma4_config(reader, a, name, names, D, H, max_ctx) -> dict:
     tokens = _field(reader, "tokenizer.ggml.tokens") or []
     shared = int(a("attention.shared_kv_layers", 0) or 0)
     return {
-        "arch": "gemma4", "hf_type": "gemma4", "name": name, "tokenizer": "gguf", "native_only": True,
+        "arch": "gemma4", "hf_type": "gemma4", "name": name, "tokenizer": "gguf",
         "n_layer": L, "n_embd": D, "n_head": H, "vocab": int(a("vocab_size") or len(tokens)),
         "head_dim": int(a("attention.key_length")), "head_dim_swa": int(a("attention.key_length_swa")),
         "n_kv_heads": per(a("attention.head_count_kv")), "ffns": per(a("feed_forward_length")),

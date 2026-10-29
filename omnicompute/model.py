@@ -516,6 +516,15 @@ def plan_layers(n_layer: int, workers: list[dict], cfg: dict | None = None,
         first, last = (own[0], own[-1]) if len(own) > 1 else (own[0], None)
         mid = [w for w in own if w is not first and w is not last]
         ws = [first] + mid + helpers + ([last] if last else [])
+    # Gemma 4's per-layer embedding table stays quantized, which browsers can't read yet: the
+    # first layers go to a computer or the app (browsers take any others, the last ones too)
+    no_first = (lambda w: w.get("kind") == "browser") if cfg and cfg.get("ple_dim") else (lambda w: False)
+    if no_first(ws[0]):
+        j = next((j for j, w in enumerate(ws) if not no_first(w) and not w.get("contributor")), None)
+        if j is None:
+            raise RuntimeError("this model's first layers need a computer or the Android app in the mesh; "
+                               "browsers can run the rest")
+        ws[0], ws[j] = ws[j], ws[0]
     scores = [max(w.get("score", 1.0), 1e-3) for w in ws]
     head_units = 0.0
     if cfg is not None and len(ws) > 1:
@@ -543,7 +552,8 @@ def plan_layers(n_layer: int, workers: list[dict], cfg: dict | None = None,
         mems = [w.get("mem_mb", 1 << 20) * 1024 * 1024 / w.get("weight_factor", 1) for w in ws]
         mine = [i for i, w in enumerate(ws) if not w.get("contributor")] or list(range(len(ws)))
         if len(ws) > 1 and mems[0] // per_layer < embed_layers + 1:  # first device also holds the embeddings
-            big = max([i for i in mine if i < len(ws) - 1] or range(len(ws) - 1), key=lambda i: mems[i])
+            big = max([i for i in mine if i < len(ws) - 1 and not no_first(ws[i])] or
+                      [i for i in range(len(ws) - 1) if not no_first(ws[i])] or [0], key=lambda i: mems[i])
             ws[0], ws[big] = ws[big], ws[0]
             mems[0], mems[big] = mems[big], mems[0]
             counts[0], counts[big] = counts[big], counts[0]

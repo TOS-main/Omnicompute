@@ -605,3 +605,38 @@ def test_helpers_never_get_the_first_or_last_layers():
     plan = plan_layers(24, ws)
     assert {plan[0][0], plan[-1][0]} == {"laptop", "phone"} and len(plan) == 4
     assert plan_layers(24, ws[:3])[0][0] == "laptop"  # one own device: it takes the prompt's end
+
+
+async def test_android_app_helps_a_computers_mesh_from_its_contribute_link(tmp_path, monkeypatch):
+    """The app's "Help my main computer" choice: a native worker joins with the pasted link."""
+    import sys as _sys
+
+    from omnicompute import android
+    from omnicompute.hub import Hub
+    from omnicompute.model import random_model, save_model
+
+    monkeypatch.setenv("OMNICOMPUTE_BEACON", "off")
+    monkeypatch.setattr(_sys, "stdout", _sys.stdout)
+    monkeypatch.setattr(_sys, "stderr", _sys.stderr)
+    import omnicompute.cli as cli
+
+    monkeypatch.setattr(cli, "HOME", tmp_path / ".omnicompute")
+    path = str(tmp_path / "m.emm")
+    save_model(path, *random_model(n_layer=2, n_embd=32, n_head=2, n_ctx=64))
+    hub = Hub("android-help-key", "127.0.0.1", 0, path)
+    await hub.start()
+    link = f"http://127.0.0.1:{hub.port}/contribute?c={hub.contribute_key}"
+    assert android.check_link(link) == "" and android.check_link("hello")
+    android.join(str(tmp_path), link, name="chromebook")
+    try:
+        for _ in range(100):
+            if any(w["node_id"] == "chromebook" for w in hub.workers()):
+                break
+            await asyncio.sleep(0.1)
+        else:
+            raise AssertionError(android.status(str(tmp_path)))
+        assert hub.clients["chromebook"].contributor
+        assert not (tmp_path / ".omnicompute" / "mesh.key").exists()  # helping makes no mesh of its own
+    finally:
+        await asyncio.get_running_loop().run_in_executor(None, android.stop)
+        await hub.close()

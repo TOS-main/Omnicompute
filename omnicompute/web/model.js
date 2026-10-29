@@ -1,5 +1,5 @@
-// GPT-2-architecture layer shard in plain JavaScript: the same math as omnicompute/model.py,
-// so a phone browser can host a slice of the model. Tensors are {data: TypedArray, shape: [...]}.
+// Layer shard in plain JavaScript (GPT-2, Llama-style and Gemma 4): the same math as
+// omnicompute/model.py, so a phone or Chromebook browser can host a slice of the model. Tensors are {data: TypedArray, shape: [...]}.
 
 "use strict";
 
@@ -92,7 +92,9 @@ class Shard {
     this.cfg = cfg; this.w = tensors; this.start = start; this.end = end;
     this.first = start === 0; this.last = end === cfg.n_layer;
     this.llama = cfg.arch === "llama";
+    this.gemma = cfg.arch === "gemma4";
     if (this.llama) this.inv = ropeInvFreq(cfg);
+    if (this.gemma) this.gemmaSetup();
     this.caches = new Map(); // job -> {len, k: {layer: Float32Array}, v: {...}}
     this.pool = null; // optional multi-core backend (see worker.js); null = compute here
   }
@@ -122,8 +124,7 @@ class Shard {
 
   drop(job) { this.caches.delete(job); }
 
-  async forward(job, x, pos) {
-    const D = this.cfg.n_embd, w = (n) => this.w[n].data;
+  jobCache(job, pos) {
     let cache = this.caches.get(job);
     if (!cache || cache.len !== pos) {
       if (pos !== 0) throw new Error(`no KV cache for job ${job} at position ${pos}`);
@@ -132,6 +133,19 @@ class Shard {
     this.caches.delete(job);
     this.caches.set(job, cache);
     while (this.caches.size > 8) this.caches.delete(this.caches.keys().next().value);
+    return cache;
+  }
+
+  // a step's tensors {x, extras} -> what goes to the next device ({x: hidden or logits, extras});
+  // only Gemma 4 has extras (see gemmaForward)
+  async forwardEx(job, t, pos) {
+    if (this.gemma) return this.gemmaForward(job, t, pos);
+    return { x: await this.forward(job, t.x, pos) };
+  }
+
+  async forward(job, x, pos) {
+    const D = this.cfg.n_embd, w = (n) => this.w[n].data;
+    const cache = this.jobCache(job, pos);
 
     let T, h;
     if (this.first) {
@@ -158,15 +172,16 @@ class Shard {
   }
 
   // q: [T, H*hd] (row stride qs, offset qo), keys/values cached as [S, KV*hd]; writes y [T, H*hd]
-  attend(q, qs, qo, K, Vc, T, pos, H, KV, hd) {
-    const y = new Float32Array(T * H * hd), kvw = KV * hd, group = H / KV, scale = 1 / Math.sqrt(hd);
+  // scale defaults to 1/sqrt(hd); window > 0: each token sees only that many most recent positions
+  attend(q, qs, qo, K, Vc, T, pos, H, KV, hd, scale = 1 / Math.sqrt(hd), window = 0) {
+    const y = new Float32Array(T * H * hd), kvw = KV * hd, group = H / KV;
     const scores = new Float64Array(pos + T);
     for (let t = 0; t < T; t++) {
-      const S = pos + t + 1;
+      const S = pos + t + 1, s0 = window > 0 ? Math.max(0, S - window) : 0;
       for (let hh = 0; hh < H; hh++) {
         const qb = t * qs + qo + hh * hd, kh = Math.floor(hh / group) * hd;
         let max = -Infinity;
-        for (let s = 0; s < S; s++) {
+        for (let s = s0; s < S; s++) {
           let d = 0;
           const kb = s * kvw + kh;
           for (let k = 0; k < hd; k++) d += q[qb + k] * K[kb + k];
@@ -175,9 +190,9 @@ class Shard {
           if (d > max) max = d;
         }
         let sum = 0;
-        for (let s = 0; s < S; s++) { scores[s] = Math.exp(scores[s] - max); sum += scores[s]; }
+        for (let s = s0; s < S; s++) { scores[s] = Math.exp(scores[s] - max); sum += scores[s]; }
         const yb = t * H * hd + hh * hd;
-        for (let s = 0; s < S; s++) {
+        for (let s = s0; s < S; s++) {
           const p = scores[s] / sum, vb = s * kvw + kh;
           for (let k = 0; k < hd; k++) y[yb + k] += p * Vc[vb + k];
         }
@@ -248,6 +263,139 @@ class Shard {
     for (let j = 0; j < g.length; j++) g[j] = (g[j] / (1 + Math.exp(-g[j]))) * u[j];
     const m = await this.mm(P + "down.w", g, T, null);
     for (let j = 0; j < m.length; j++) m[j] += a[j];
+    return m;
+  }
+
+  // ---- Gemma 4 (see omnicompute/model.py): sliding-window and full layers with their own head
+  // sizes, q/k/v norms, unscaled attention, norms after attention and the MLP, per-layer
+  // embeddings (PLE) and a learned output scale. The last n_kv_shared layers reuse the keys and
+  // values of the last earlier layer of the same kind; between devices travel the PLE inputs of
+  // the layers still to come ("ple") and the source keys/values a later device needs ("kvk.j").
+
+  gemmaSetup() {
+    const c = this.cfg, hd = c.head_dim, hds = c.head_dim_swa, f = c.rope_factors || [];
+    this.invFull = Float64Array.from({ length: hd / 2 }, (_, j) => 1 / Math.pow(c.rope_theta, (2 * j) / hd) / (f.length === hd / 2 ? f[j] : 1));
+    this.invSwa = Float64Array.from({ length: hds / 2 }, (_, j) => 1 / Math.pow(c.rope_theta_swa, (2 * j) / hds));
+    const L = c.n_layer, firstShared = L - (c.n_kv_shared || 0);
+    this.kvSrc = {};
+    for (let i = firstShared; i < L; i++) {
+      let j = -1;
+      for (let k = 0; k < firstShared; k++) if (c.swa[k] === c.swa[i]) j = k;
+      this.kvSrc[i] = j;
+    }
+    this.sendKv = new Set(Object.keys(this.kvSrc).map(Number).filter((i) => i >= this.end).map((i) => this.kvSrc[i]));
+  }
+
+  async gemmaForward(job, t, pos) {
+    const c = this.cfg, D = c.n_embd, cache = this.jobCache(job, pos);
+    let T, h, ple = null, pleL = 0;
+    if (this.first) {
+      if (c.ple_dim) throw new Error("the first layers of this model run on a computer or the app");
+      T = t.x.data.length;
+      h = new Float32Array(T * D);
+      const emb = this.w.embed.data, sc = Math.fround(Math.sqrt(D));
+      for (let i = 0; i < T; i++) for (let k = 0; k < D; k++) h[i * D + k] = emb[t.x.data[i] * D + k] * sc;
+    } else {
+      T = t.x.shape[0];
+      h = Float32Array.from(t.x.data);
+      if (t.ple) { ple = t.ple.data; pleL = t.ple.shape[1]; }
+      for (const name of Object.keys(t)) { // an earlier device's source keys/values, [KV, T, hd]
+        if (!name.startsWith("kvk.")) continue;
+        const j = Number(name.slice(4)), k = t[name], [KV, n, hd] = k.shape;
+        const [K, Vc] = this.kv(cache, j, KV * hd, pos + n);
+        this.fromHeads(k.data, K, pos, KV, n, hd);
+        this.fromHeads(t[`kvv.${j}`].data, Vc, pos, KV, n, hd);
+      }
+    }
+    this.stepKv = {};
+    const P = c.ple_dim || 0;
+    for (let l = this.start; l < this.end; l++) {
+      let pi = null;
+      if (ple) {
+        pi = new Float32Array(T * P);
+        for (let i = 0; i < T; i++) pi.set(ple.subarray((i * pleL + l - this.start) * P, (i * pleL + l - this.start + 1) * P), i * P);
+      }
+      h = await this.gemmaBlock(l, h, T, pos, cache, pi);
+    }
+    cache.len = pos + T;
+    if (this.last) {
+      const n = rmsNorm(h.subarray((T - 1) * D, T * D), 1, D, this.w.norm_f.data, c.rms_eps, new Float32Array(D));
+      const logits = this.w.lm_head ? await this.mm("lm_head", n, 1, null) : await this.tiedHead("embed", n);
+      if (c.softcap) for (let i = 0; i < logits.length; i++) logits[i] = Math.tanh(logits[i] / c.softcap) * c.softcap;
+      return { x: { data: logits, shape: [logits.length] } };
+    }
+    const out = { x: { data: h, shape: [T, D] } };
+    if (ple) {
+      const left = pleL - (this.end - this.start), o = new Float32Array(T * left * P);
+      for (let i = 0; i < T; i++) o.set(ple.subarray((i * pleL + this.end - this.start) * P, (i + 1) * pleL * P), i * left * P);
+      out.ple = { data: o, shape: [T, left, P] };
+    }
+    for (const j of this.sendKv) {
+      if (this.stepKv[j]) { out[`kvk.${j}`] = this.stepKv[j][0]; out[`kvv.${j}`] = this.stepKv[j][1]; }
+      else if (t[`kvk.${j}`]) { out[`kvk.${j}`] = t[`kvk.${j}`]; out[`kvv.${j}`] = t[`kvv.${j}`]; }
+    }
+    return out;
+  }
+
+  // rows [T, KV*hd] at position pos of the cache <- [KV, T, hd], and back
+  fromHeads(src, dst, pos, KV, T, hd) {
+    for (let g = 0; g < KV; g++) for (let i = 0; i < T; i++) dst.set(src.subarray((g * T + i) * hd, (g * T + i + 1) * hd), (pos + i) * KV * hd + g * hd);
+  }
+
+  toHeads(rows, KV, T, hd) {
+    const out = new Float32Array(KV * T * hd);
+    for (let g = 0; g < KV; g++) for (let i = 0; i < T; i++) out.set(rows.subarray(i * KV * hd + g * hd, i * KV * hd + (g + 1) * hd), (g * T + i) * hd);
+    return { data: out, shape: [KV, T, hd] };
+  }
+
+  async gemmaBlock(i, x, T, pos, cache, pleI) {
+    const c = this.cfg, P = `h.${i}.`, w = (n) => this.w[P + n].data;
+    const swa = c.swa[i], eps = c.rms_eps, H = c.n_head, D = c.n_embd, KV = c.n_kv_heads[i];
+    const hd = swa ? c.head_dim_swa : c.head_dim, inv = swa ? this.invSwa : this.invFull;
+    const h = rmsNorm(x, T, D, w("attn_norm"), eps, new Float32Array(T * D));
+    const src = this.kvSrc[i], shared = src !== undefined;
+    const names = [P + "q.w"].concat(shared ? [] : [P + "k.w"].concat(c.k_eq_v[i] ? [] : [P + "v.w"]));
+    const outs = await Promise.all(names.map((n) => this.mm(n, h, T, null)));
+    const q = outs[0], qn = w("q_norm");
+    for (let t = 0; t < T; t++) for (let hh = 0; hh < H; hh++) {
+      const o = t * H * hd + hh * hd, s = q.subarray(o, o + hd);
+      rmsNorm(s, 1, hd, qn, eps, s);
+      rope(q, o, hd, pos + t, inv);
+    }
+    let K, Vc, kvh = KV;
+    if (shared) {
+      K = cache.k[src]; Vc = cache.v[src]; kvh = c.n_kv_heads[src];
+      if (!K) throw new Error(`no keys/values from layer ${src}`);
+    } else {
+      const k = outs[1], v = c.k_eq_v[i] ? Float32Array.from(k) : outs[2], kn = w("k_norm"), one = new Float32Array(hd).fill(1);
+      for (let t = 0; t < T; t++) for (let hh = 0; hh < KV; hh++) {
+        const o = t * KV * hd + hh * hd, ks = k.subarray(o, o + hd), vs = v.subarray(o, o + hd);
+        rmsNorm(ks, 1, hd, kn, eps, ks);
+        rope(k, o, hd, pos + t, inv);
+        rmsNorm(vs, 1, hd, one, eps, vs);
+      }
+      if (this.sendKv.has(i)) this.stepKv[i] = [this.toHeads(k, KV, T, hd), this.toHeads(v, KV, T, hd)];
+      [K, Vc] = this.kv(cache, i, KV * hd, pos + T);
+      K.set(k, pos * KV * hd);
+      Vc.set(v, pos * KV * hd);
+    }
+    const y = this.attend(q, H * hd, 0, K, Vc, T, pos, H, kvh, hd, 1, swa ? c.window : 0);
+    const a = rmsNorm(await this.mm(P + "o.w", y, T, null), T, D, w("post_attn_norm"), eps, new Float32Array(T * D));
+    for (let j = 0; j < a.length; j++) a[j] += x[j];
+    const h2 = rmsNorm(a, T, D, w("mlp_norm"), eps, new Float32Array(T * D));
+    const [g, u] = await Promise.all([this.mm(P + "gate.w", h2, T, null), this.mm(P + "up.w", h2, T, null)]);
+    gelu(g);
+    for (let j = 0; j < g.length; j++) g[j] *= u[j];
+    const m = rmsNorm(await this.mm(P + "down.w", g, T, null), T, D, w("post_mlp_norm"), eps, new Float32Array(T * D));
+    for (let j = 0; j < m.length; j++) m[j] += a[j];
+    if (pleI) {
+      const pg = gelu(await this.mm(P + "ple_gate.w", m, T, null));
+      for (let j = 0; j < pg.length; j++) pg[j] *= pleI[j];
+      const po = rmsNorm(await this.mm(P + "ple_out.w", pg, T, null), T, D, w("ple_post_norm"), eps, new Float32Array(T * D));
+      for (let j = 0; j < m.length; j++) m[j] += po[j];
+    }
+    const sc = w("out_scale")[0];
+    for (let j = 0; j < m.length; j++) m[j] *= sc;
     return m;
   }
 }

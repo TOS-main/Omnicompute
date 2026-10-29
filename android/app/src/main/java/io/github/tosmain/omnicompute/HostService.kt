@@ -46,9 +46,10 @@ class HostService : Service() {
         }
         val prefs = Prefs(this)
         Thread {
-            py(this).getModule("omnicompute.android").callAttr(
-                "start", filesDir.absolutePath, cloudflared(this), prefs.compute, prefs.cores, 8000,
-                !prefs.ownIp, prefs.ownUrl)
+            val m = py(this).getModule("omnicompute.android")
+            if (prefs.helping) m.callAttr("join", filesDir.absolutePath, prefs.helpLink, Build.MODEL.take(20), prefs.cores)
+            else m.callAttr("start", filesDir.absolutePath, cloudflared(this), prefs.compute, prefs.cores, 8000,
+                            !prefs.ownIp, prefs.ownUrl)
         }.start()
         return START_STICKY
     }
@@ -76,8 +77,8 @@ class HostService : Service() {
         val stop = PendingIntent.getService(this, 1, Intent(this, HostService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_notify)
-            .setContentTitle(getString(R.string.hosting))
-            .setContentText(getString(R.string.hosting_text))
+            .setContentTitle(getString(if (Prefs(this).helping) R.string.helping else R.string.hosting))
+            .setContentText(getString(if (Prefs(this).helping) R.string.helping_text else R.string.hosting_text))
             .setContentIntent(open)
             .setOngoing(true)
             .addAction(Notification.Action.Builder(null, getString(R.string.stop), stop).build())

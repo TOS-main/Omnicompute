@@ -35,7 +35,6 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
-        HostService.start(this)  // hosting is what the app is for: opening it starts the mesh
 
         web = WebView(this)
         web.settings.javaScriptEnabled = true
@@ -63,7 +62,55 @@ class MainActivity : Activity() {
         }
         setContentView(web)
         waiting()
+        if (Prefs(this).mode.isEmpty()) chooseMode() else begin()
+    }
+
+    /** Start the chosen job: host this mesh, or help the computer whose link was pasted. */
+    private fun begin() {
+        HostService.start(this)
         ui.postDelayed({ open() }, 1500)
+    }
+
+    /** Asked on the first start (and from the menu), so the app never makes a mesh nobody wanted. */
+    private fun chooseMode() {
+        val p = Prefs(this)
+        android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.choose)
+            .setCancelable(false)
+            .setItems(arrayOf(getString(R.string.choose_help), getString(R.string.choose_host))) { _, which ->
+                if (which == 1) { p.mode = "host"; switchTo() } else askHelpLink()
+            }
+            .show()
+    }
+
+    private fun askHelpLink() {
+        val p = Prefs(this)
+        val input = android.widget.EditText(this).apply { hint = "https://…/go.html#c=…"; setSingleLine(); setText(p.helpLink) }
+        android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.help_title)
+            .setMessage(R.string.help_text)
+            .setView(input)
+            .setCancelable(false)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val link = input.text.toString().trim()
+                val why = try {
+                    HostService.py(this).getModule("omnicompute.android").callAttr("check_link", link).toString()
+                } catch (e: Exception) { e.toString() }
+                if (why.isNotEmpty()) {
+                    android.widget.Toast.makeText(this, why, android.widget.Toast.LENGTH_LONG).show()
+                    askHelpLink()
+                } else { p.mode = "help"; p.helpLink = link; switchTo() }
+            }
+            .setNegativeButton(android.R.string.cancel) { _, _ -> chooseMode() }
+            .show()
+    }
+
+    private fun switchTo() {
+        loaded = false
+        if (helpTimer != null) { ui.removeCallbacks(helpTimer!!); helpTimer = null }
+        HostService.stop(this)
+        ui.postDelayed({ begin() }, 3000)
+        invalidateOptionsMenu()
     }
 
     private fun home() = filesDir.absolutePath
@@ -74,10 +121,28 @@ class MainActivity : Activity() {
             "<p>${getString(R.string.starting)}</p></body>", "text/html", "utf-8", null)
     }
 
+    private var helpTimer: Runnable? = null
+
     private fun open() {
+        if (Prefs(this).helping) { showHelping(); return }
         val k = key()
         if (k.isEmpty()) { ui.postDelayed({ open() }, 1000); return }  // the first start makes the key
         if (!loaded) { loaded = true; web.loadUrl("http://127.0.0.1:8000/?k=" + Uri.encode(k)) }
+    }
+
+    /** While helping there is no page on this device: show what the worker is doing. */
+    private fun showHelping() {
+        loaded = true
+        val text = try {
+            HostService.py(this).getModule("omnicompute.android").callAttr("status", home()).toString()
+        } catch (_: Exception) { "" }
+        val esc = text.replace("&", "&amp;").replace("<", "&lt;")
+        web.loadDataWithBaseURL(null, "<body style='font:15px sans-serif;background:#111318;color:#ddd;padding:16px'>" +
+            "<h2>${getString(R.string.helping)}</h2><p>${getString(R.string.helping_text)}</p>" +
+            "<pre style='white-space:pre-wrap;color:#9aa2b1'>$esc</pre></body>", "text/html", "utf-8", null)
+        helpTimer?.let { ui.removeCallbacks(it) }
+        helpTimer = Runnable { if (Prefs(this).helping) showHelping() }
+        ui.postDelayed(helpTimer!!, 4000)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -103,7 +168,8 @@ class MainActivity : Activity() {
         menu.add(0, 5, 4, R.string.battery)
         menu.add(0, 8, 5, R.string.connection)
         menu.add(0, 7, 5, R.string.use_key)
-        menu.add(0, 6, 6, R.string.stop_hosting)
+        menu.add(0, 9, 6, R.string.switch_mode)
+        menu.add(0, 6, 7, R.string.stop_hosting)
         return true
     }
 
@@ -118,6 +184,7 @@ class MainActivity : Activity() {
             6 -> { HostService.stop(this); finishAndRemoveTask() }
             7 -> askKey()
             8 -> askConnection()
+            9 -> chooseMode()
             else -> return super.onOptionsItemSelected(item)
         }
         return true

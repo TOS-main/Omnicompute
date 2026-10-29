@@ -118,7 +118,7 @@ async function distribute(shard) {
     await pool.putMatrix(name, t);
     if (pool === gpuPool && !(await gpuAgrees(name, t, false))) return gpuFailed(shard, name);
   }
-  const tied = shard.last && !shard.w["lm_head"] ? (shard.llama ? "embed" : "wte") : null;
+  const tied = shard.last && !shard.w["lm_head"] ? (shard.llama || shard.gemma ? "embed" : "wte") : null;
   if (tied) {
     await pool.putRows(tied + "^T", shard.w[tied]);
     if (pool === gpuPool && !(await gpuAgrees(tied + "^T", shard.w[tied], true))) return gpuFailed(shard, tied);
@@ -252,15 +252,15 @@ async function handle(from, header, payload) {
       const [cpu] = effectiveLimit();
       if (cpu <= 0) throw new Error("paused by its usage limit");
       const t0 = performance.now();
-      const y = await shard.forward(header.job, decodeTensors(payload)["x"], header.pos);
+      const out = await shard.forwardEx(header.job, decodeTensors(payload), header.pos);
       const busy = (performance.now() - t0) / 1000;
       stats.tokens++;
       const timings = [...(header.timings || []), [cfgStart.name, busy]];
       if (cpu < 100) await sleep(busy * (100 / cpu - 1) * 1000); // duty cycle down to the limit
       if (header.hop + 1 < header.route.length) {
-        sendTo(header.route[header.hop + 1].node, { ...header, hop: header.hop + 1, kind: "msg", timings }, encodeTensors({ x: y }));
+        sendTo(header.route[header.hop + 1].node, { ...header, hop: header.hop + 1, kind: "msg", timings }, encodeTensors(out));
       } else {
-        sendTo(header.reply_to, { op: "result", req: header.req, kind: "msg", timings }, encodeTensors({ logits: y }));
+        sendTo(header.reply_to, { op: "result", req: header.req, kind: "msg", timings }, encodeTensors({ logits: out.x }));
       }
       if (stats.tokens % 5 === 0) status("ready");
     } catch (e) {

@@ -26,6 +26,16 @@ class Prefs(context: Context) {
         get() = p.getString("own_url", "") ?: ""
         set(v) = p.edit().putString("own_url", v).apply()
 
+    var mode: String  // "" = not chosen yet, "host" = this device is the main one, "help" = it helps another's mesh
+        get() = p.getString("mode", "") ?: ""
+        set(v) = p.edit().putString("mode", v).apply()
+
+    var helpLink: String  // with mode "help": the contribute link (or permanent link) of the mesh to help
+        get() = p.getString("help_link", "") ?: ""
+        set(v) = p.edit().putString("help_link", v).apply()
+
+    val helping: Boolean get() = mode == "help" && helpLink.isNotEmpty()
+
     var hosting: Boolean  // false after the user pressed Stop, so a reboot doesn't start it again
         get() = p.getBoolean("hosting", true)
         set(v) = p.edit().putBoolean("hosting", v).apply()

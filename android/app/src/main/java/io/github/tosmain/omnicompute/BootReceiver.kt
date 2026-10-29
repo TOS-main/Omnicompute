@@ -8,6 +8,6 @@ import android.content.Intent
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val prefs = Prefs(context)
-        if (prefs.startAtBoot && prefs.hosting) HostService.start(context)
+        if (prefs.startAtBoot && prefs.hosting && prefs.mode.isNotEmpty()) HostService.start(context)
     }
 }

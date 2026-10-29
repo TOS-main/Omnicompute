@@ -49,11 +49,43 @@ async function go() {
     setTimeout(go, 15000);
     return;
   }
+  const target = link(info.url), host = new URL(info.url).host;
   $("title").textContent = "Found it";
-  $("text").textContent = `Opening ${new URL(info.url).host}…`;
-  $("actions").innerHTML = `<a class="btn" href="${link(info.url)}">Open</a>` +
-    (info.lan && info.lan !== info.url ? `<a class="btn ghost" href="${link(info.lan)}">On the same Wi-Fi (faster)</a>` : "");
-  setTimeout(() => location.replace(link(info.url)), 900);
+  $("text").textContent = `Checking that ${host} answers…`;
+  $("actions").innerHTML = `<a class="btn" href="${target}">Open</a>`;
+  if (!(await answers(info.url))) {
+    $("title").textContent = "The main computer isn't answering";
+    $("text").innerHTML = `It last posted the address <b>${host}</b>, but nothing answers there from this network. ` +
+      (info.url.startsWith("http:") ? "That is its own IP address: the router must forward its port to it, or run the host with " +
+        "Cloudflare instead (choose 1 when the installer asks how devices reach it). "
+        : "Its Cloudflare tunnel may have just restarted, or the computer is asleep or off. ") +
+      "This page tries again every 15 seconds.";
+    setTimeout(go, 15000);
+    return;
+  }
+  $("text").textContent = `Opening ${host}…`;
+  location.replace(target);
+}
+
+// true when the host's page loads from here. An https host is checked with a quick request; a
+// plain http one (its own IP) can't be checked from this https page, so it is opened and the page
+// says what to do if nothing loads.
+async function answers(origin) {
+  if (origin.startsWith("http:")) {
+    setTimeout(() => {
+      $("title").textContent = "Still trying…";
+      $("text").innerHTML = `If nothing opens, <b>${new URL(origin).host}</b> doesn't answer from this network: ` +
+        "its router must forward the port, or run the host with Cloudflare instead (choose 1 when the installer asks).";
+    }, 8000);
+    return true;
+  }
+  for (const mode of ["cors", "no-cors"]) { // hosts before this check don't allow "cors" yet
+    try {
+      const r = await fetch(origin + "/api/hello", { mode, cache: "no-store", signal: AbortSignal.timeout(8000) });
+      if (mode === "no-cors" || r.ok) return true;
+    } catch { /* not reachable, or an older host */ }
+  }
+  return false;
 }
 go();
 </script>

@@ -4,6 +4,7 @@ A tiny random Gemma 4 (sliding and full layers with different head sizes, per-la
 shared key/value layers, final logit softcapping) is written as GGUF the way llama.cpp's
 converter does, then run whole and split across devices."""
 
+import asyncio
 import json
 
 import numpy as np
@@ -220,3 +221,101 @@ async def test_gemma4_across_three_devices_matches_transformers(gemma4):
         for n in nodes:
             await n.close()
         await hub.close()
+
+
+@pytest.mark.skipif(__import__("shutil").which("node") is None, reason="needs node.js")
+@pytest.mark.parametrize("cuts", [[0, 1, 4, 6], [0, 2, 5, 6], [0, 3, 6]], ids=["sends-kv", "shared-inside", "browser-last"])
+def test_gemma4_browser_shard_between_computers_matches_transformers(gemma4, tmp_path, cuts):
+    """A browser (model.js) runs the middle or last layers: it gets the per-layer inputs and the
+    shared keys/values from the computer before it and passes them on."""
+    import subprocess
+
+    from omnicompute.protocol import decode_tensors, encode_tensors, pack
+
+    model, tok, path = gemma4
+    src = GGUFSource(path, dtype=np.float32)
+    cfg = src.cfg
+    a, b = cuts[1], cuts[2]
+    ids = [2] + [(i * 37) % 390 + 5 for i in range(13)]
+    steps = [(np.array(ids, np.int32), 0), (np.array([7], np.int32), len(ids))]
+    first = Shard(cfg, shard_tensors(src, 0, a), 0, a)
+    ins = [first.forward_ex("job", {"x": x}, pos) for x, pos in steps]
+    req = tmp_path / "req.bin"
+    tensors = dict(shard_tensors(src, a, b))
+    for n, t in enumerate(ins):
+        tensors.update({f"s{n}.{k}": v for k, v in t.items()})
+    req.write_bytes(pack({"cfg": cfg, "start": a, "end": b, "pos": [p for _, p in steps]}, encode_tensors(tensors)))
+    res = subprocess.run(["node", "tests/js_forward_ex.js", str(req)], capture_output=True)
+    assert res.returncode == 0, res.stderr.decode()
+    out = decode_tensors(res.stdout)
+    mids = [{k.split(".", 1)[1]: v for k, v in out.items() if k.startswith(f"s{n}.")} for n in range(2)]
+    if b < cfg["n_layer"]:
+        last = Shard(cfg, shard_tensors(src, b, cfg["n_layer"]), b, cfg["n_layer"])
+        logits = [last.forward_ex("job", t, pos)["x"] for t, (_, pos) in zip(mids, steps)]
+    else:
+        logits = [t["x"] for t in mids]
+    np.testing.assert_allclose(logits[0], _reference(model, ids), atol=2e-3, rtol=1e-3)
+    np.testing.assert_allclose(logits[1], _reference(model, ids + [7]), atol=2e-3, rtol=1e-3)
+
+
+async def test_gemma4_with_a_chromebook_browser_on_the_contribute_link(gemma4):
+    """The contribute link opened in a browser: it takes layers of a Gemma 4 mesh next to the computer."""
+    import os
+    import tempfile
+    from pathlib import Path
+
+    playwright = pytest.importorskip("playwright.async_api")
+    from omnicompute.hub import Hub
+    from omnicompute.limits import LimitStore
+    from omnicompute.node import MeshNode
+    from omnicompute.worker import Worker
+
+    model, tok, path = gemma4
+    key = "gemma4-browser-key"
+    hub = Hub(key, "127.0.0.1", 0, GGUFSource(path))
+    await hub.start()
+    pc = MeshNode("pc", key, f"http://127.0.0.1:{hub.port}", {"role": "worker", "kind": "native", "score": 1, "mem_mb": 1024})
+    Worker(LimitStore(Path(tempfile.mkdtemp()) / "l.json", {"cpu": 100, "always": True})).attach(pc)
+    await pc.start()
+    async with playwright.async_playwright() as p:
+        try:
+            browser = await p.chromium.launch()
+        except Exception:
+            browser = await p.chromium.launch(executable_path="/opt/pw-browsers/chromium", args=["--no-sandbox"])
+        try:
+            page = await (await browser.new_context()).new_page()
+            await page.goto(f"http://127.0.0.1:{hub.port}/contribute?c={hub.contribute_key}")
+            await page.evaluate("localStorage.setItem('edgemesh.limits', JSON.stringify({cpu: 100, always: true}))")
+            await page.reload()
+            await page.click("#toggle")
+            for _ in range(200):
+                if any(c.info.get("kind") == "browser" for c in hub.clients.values()):
+                    break
+                await asyncio.sleep(0.1)
+            for c in hub.clients.values():
+                c.info["score"] = {"pc": 1}.get(c.node_id, 3)  # the browser is faster: it would go first
+                c.info["limits"], c.info["limit"] = {"always": True}, 100
+            events = [ev async for ev in hub.orchestrator.generate("Hello world", 8)]
+            assert [e for e in events if e["type"] == "error"] == []
+            plan = events[0]["plan"]
+            assert len(plan) == 2 and plan[0][0] == "pc"  # the browser takes the last layers
+            ids = [e["id"] for e in events if e["type"] == "token"]
+            prompt = hub.orchestrator.tokenizer.encode("Hello world")
+            with torch.no_grad():
+                want = model.generate(torch.tensor([prompt]), max_new_tokens=len(ids), do_sample=False)[0, len(prompt):].tolist()
+            assert ids and ids == want[:len(ids)]
+        finally:
+            await browser.close()
+            await pc.close()
+            await hub.close()
+
+
+def test_gemma4_plan_keeps_browsers_off_the_first_layers(gemma4):
+    from omnicompute.model import plan_layers
+
+    cfg = GGUFSource(gemma4[2]).cfg
+    fast_browser = {"node_id": "tab", "kind": "browser", "score": 9}
+    plan = plan_layers(6, [fast_browser, {"node_id": "pc", "kind": "native", "score": 1}], cfg)
+    assert plan[0][0] == "pc" and plan[-1][0] == "tab"
+    with pytest.raises(RuntimeError, match="computer or the Android app"):
+        plan_layers(6, [fast_browser], cfg)

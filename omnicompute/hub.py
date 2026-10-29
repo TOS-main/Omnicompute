@@ -328,7 +328,8 @@ class Hub:
     async def _hello(self, request: web.Request) -> web.Response:
         """No key needed: lets a second `omnicompute host` see that Omnicompute already runs on a port."""
         return web.json_response({"omnicompute": True, "mesh": hashlib.sha256(self.secret.encode()).hexdigest()[:12],
-                                  "repo": project.REPO, "raw": project.RAW, "pages": project.PAGES})
+                                  "repo": project.REPO, "raw": project.RAW, "pages": project.PAGES},
+                                 headers={"Access-Control-Allow-Origin": "*"})  # the permanent link page checks it
 
     async def _contribute_page(self, request: web.Request) -> web.Response:
         return web.Response(text=_web_file("contribute.html"), content_type="text/html")
