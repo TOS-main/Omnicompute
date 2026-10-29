@@ -301,6 +301,8 @@ async def cmd_links(args) -> None:
 
     from .crypto import contribute_key
 
+    if not args.key and not (HOME / "mesh.key").exists():  # a contributor: don't make up a new mesh
+        sys.exit("This device isn't a main computer, so it has no mesh key. Run  edgemesh links  on the main computer.")
     key = _mesh_key(args.key)
     mine = hashlib.sha256(key.encode()).hexdigest()[:12]
     port = None
