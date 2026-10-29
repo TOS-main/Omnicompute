@@ -79,7 +79,7 @@ def error() -> str:
 
 def mesh_key(home: str) -> str:
     p = Path(home) / ".edgemesh" / "mesh.key"
-    return p.read_text().strip() if p.exists() else ""
+    return p.read_text(encoding="utf-8").strip() if p.exists() else ""
 
 
 def permanent_link(home: str) -> str:

@@ -76,6 +76,12 @@ if [ -z "$CORES" ] && [ "${EDGEMESH_YES:-}" != "1" ]; then
   printf "This computer has %s CPU cores. How many should EdgeMesh use? [all] " "$CORES_ALL"
   { read -r CORES < /dev/tty; } 2>/dev/null || CORES=""
 fi
+AWAKE="${EDGEMESH_AWAKE:-}"
+if [ -z "$AWAKE" ] && [ "${EDGEMESH_YES:-}" != "1" ]; then
+  printf "Keep this computer from going to sleep while it helps (the screen can still turn off)? [y/N] "
+  { read -r AWAKE < /dev/tty; } 2>/dev/null || AWAKE=""
+fi
+case "$AWAKE" in y*|Y*|1) AWAKE="--awake" ;; *) AWAKE="" ;; esac
 case "$CORES" in ''|*[!0-9]*) CORES="" ;; *) [ "$CORES" -ge "$CORES_ALL" ] && CORES="" ;; esac
 
 echo "Downloading EdgeMesh from $FROM..."
@@ -113,9 +119,10 @@ if [ -z "$JOIN" ]; then
   echo "this computer's address changes. Start it again later with: $DIR/edgemesh-host"
   exec "$DIR/edgemesh-host"
 fi
-"$DIR/venv/bin/python" -m edgemesh contribute "$JOIN" ${CORES:+--cores "$CORES"}
+"$DIR/venv/bin/python" -m edgemesh contribute "$JOIN" ${CORES:+--cores "$CORES"} $AWAKE
 echo
 echo "Done. This computer now shows up in the main device's Devices tab, from any network."
 echo "Usage limit is 80% by default; change it and the cores there. On this computer:"
+echo "  change:     $DIR/venv/bin/edgemesh limits --cpu 50 --gpu 80 --cores 4 --awake on"
 echo "  pause:      $DIR/venv/bin/edgemesh contribute --stop"
 echo "  uninstall:  $DIR/venv/bin/edgemesh contribute --uninstall"

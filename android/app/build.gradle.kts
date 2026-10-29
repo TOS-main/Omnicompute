@@ -58,7 +58,7 @@ val copyEdgemesh by tasks.registering(Copy::class) {
     from(rootProject.file("../edgemesh")) { exclude("**/__pycache__/**", "**/*.pyc") }
     into(layout.buildDirectory.dir("python-src/edgemesh"))
 }
-tasks.named("preBuild") { dependsOn(copyEdgemesh) }
+tasks.configureEach { if (name.contains("PythonSources")) dependsOn(copyEdgemesh) }
 
 chaquopy {
     defaultConfig {

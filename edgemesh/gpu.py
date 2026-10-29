@@ -28,69 +28,91 @@ import numpy as np
 
 log = logging.getLogger("edgemesh.gpu")
 
-# float16 weights: each u32 holds two neighbouring columns of one row.
-SHADER_F16 = """
-struct P { K: u32, N2: u32, T: u32, pad: u32 };
-@group(0) @binding(0) var<storage, read> W: array<u32>;
-@group(0) @binding(1) var<storage, read> X: array<f32>;
-@group(0) @binding(2) var<storage, read_write> Y: array<vec2<f32>>;
-@group(0) @binding(3) var<uniform> p: P;
-var<workgroup> part: array<vec2<f32>, 256>;
+# Both shaders come in two forms: one token (each new token while answering) and four tokens
+# per workgroup (reading a prompt), which reads every weight once per four tokens. The same
+# generator lives in web/gpu.js. Accumulators are separate variables, not an indexed array,
+# so they stay in registers.
 
-// 32 column pairs per workgroup, each summed by 8 threads over every 8th row, so a GPU's
-// thousands of threads all stay busy even on small matrices.
-@compute @workgroup_size(32, 8)
-fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
-  let n = wg.x * 32u + l.x;
-  let t = wg.y;
-  var acc = vec2<f32>(0.0, 0.0);
-  if (n < p.N2) {
-    let xo = t * p.K;
-    for (var k = l.y; k < p.K; k = k + 8u) {
-      acc = acc + X[xo + k] * unpack2x16float(W[k * p.N2 + n]);
-    }
-  }
-  part[l.y * 32u + l.x] = acc;
-  workgroupBarrier();
-  if (l.y == 0u && n < p.N2) {
-    var s = part[l.x];
-    for (var i = 1u; i < 8u; i = i + 1u) { s = s + part[i * 32u + l.x]; }
-    Y[t * p.N2 + n] = s;
-  }
-}
-"""
+def _shader_f16(tt: int) -> str:
+    """float16 weights: each u32 holds two neighbouring columns of one row. 32 column pairs per
+    workgroup, each summed by 8 threads over every 8th row, so a GPU's thousands of threads
+    all stay busy even on small matrices."""
+    r = range(tt)
+    return "\n".join([
+        "struct P { K: u32, N2: u32, T: u32, pad: u32 };",
+        "@group(0) @binding(0) var<storage, read> W: array<u32>;",
+        "@group(0) @binding(1) var<storage, read> X: array<f32>;",
+        "@group(0) @binding(2) var<storage, read_write> Y: array<vec2<f32>>;",
+        "@group(0) @binding(3) var<uniform> p: P;",
+        *[f"var<workgroup> part{i}: array<vec2<f32>, 256>;" for i in r],
+        "@compute @workgroup_size(32, 8)",
+        "fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {",
+        "  let n = wg.x * 32u + l.x;",
+        f"  let t0 = wg.y * {tt}u;",
+        *[f"  let x{i} = min(t0 + {i}u, p.T - 1u) * p.K;" for i in r],
+        *[f"  var a{i} = vec2<f32>(0.0, 0.0);" for i in r],
+        "  if (n < p.N2) {",
+        "    for (var k = l.y; k < p.K; k = k + 8u) {",
+        "      let w = unpack2x16float(W[k * p.N2 + n]);",
+        *[f"      a{i} = a{i} + X[x{i} + k] * w;" for i in r],
+        "    }",
+        "  }",
+        *[f"  part{i}[l.y * 32u + l.x] = a{i};" for i in r],
+        "  workgroupBarrier();",
+        "  if (l.y == 0u && n < p.N2) {",
+        *[f"    if (t0 + {i}u < p.T) {{ var s = part{i}[l.x]; for (var j = 1u; j < 8u; j = j + 1u) {{ s = s + part{i}[j * 32u + l.x]; }} "
+          f"Y[(t0 + {i}u) * p.N2 + n] = s; }}" for i in r],
+        "  }",
+        "}"])
 
-# 8-bit weights: each u32 holds four consecutive rows of one column (signed, /127), and S holds
-# one scale per group of G4 u32s (4 * G4 rows) per column.
-SHADER_Q8 = """
-struct P { K4: u32, N: u32, T: u32, G4: u32 };
-@group(0) @binding(0) var<storage, read> W: array<u32>;
-@group(0) @binding(1) var<storage, read> X: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read_write> Y: array<f32>;
-@group(0) @binding(3) var<uniform> p: P;
-@group(0) @binding(4) var<storage, read> S: array<f32>;
-var<workgroup> part: array<f32, 256>;
 
-@compute @workgroup_size(32, 8)
-fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
-  let n = wg.x * 32u + l.x;
-  let t = wg.y;
-  var acc = 0.0;
-  if (n < p.N) {
-    let xo = t * p.K4;
-    for (var k = l.y; k < p.K4; k = k + 8u) {
-      acc = acc + dot(X[xo + k], unpack4x8snorm(W[k * p.N + n])) * S[(k / p.G4) * p.N + n];
-    }
-  }
-  part[l.y * 32u + l.x] = acc;
-  workgroupBarrier();
-  if (l.y == 0u && n < p.N) {
-    var s = part[l.x];
-    for (var i = 1u; i < 8u; i = i + 1u) { s = s + part[i * 32u + l.x]; }
-    Y[t * p.N + n] = s;
-  }
-}
-"""
+def _shader_q8(tt: int) -> str:
+    """8-bit weights: each u32 holds four consecutive rows of one column (signed, /127), and S
+    holds one scale per group of G4 u32s (4 * G4 rows) per column. Each of a column's 8 threads
+    takes whole groups, so it reads each scale once per group rather than once per row."""
+    r = range(tt)
+    return "\n".join([
+        "struct P { K4: u32, N: u32, T: u32, G4: u32 };",
+        "@group(0) @binding(0) var<storage, read> W: array<u32>;",
+        "@group(0) @binding(1) var<storage, read> X: array<vec4<f32>>;",
+        "@group(0) @binding(2) var<storage, read_write> Y: array<f32>;",
+        "@group(0) @binding(3) var<uniform> p: P;",
+        "@group(0) @binding(4) var<storage, read> S: array<f32>;",
+        *[f"var<workgroup> part{i}: array<f32, 256>;" for i in r],
+        "@compute @workgroup_size(32, 8)",
+        "fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {",
+        "  let n = wg.x * 32u + l.x;",
+        f"  let t0 = wg.y * {tt}u;",
+        *[f"  let x{i} = min(t0 + {i}u, p.T - 1u) * p.K4;" for i in r],
+        *[f"  var a{i} = 0.0;" for i in r],
+        "  if (n < p.N) {",
+        "    let groups = p.K4 / p.G4;",
+        "    for (var g = l.y; g < groups; g = g + 8u) {",
+        *[f"      var s{i} = 0.0;" for i in r],
+        "      let k0 = g * p.G4;",
+        "      for (var k = k0; k < k0 + p.G4; k = k + 1u) {",
+        "        let w = unpack4x8snorm(W[k * p.N + n]);",
+        *[f"        s{i} = s{i} + dot(X[x{i} + k], w);" for i in r],
+        "      }",
+        "      let sc = S[g * p.N + n];",
+        *[f"      a{i} = a{i} + s{i} * sc;" for i in r],
+        "    }",
+        "  }",
+        *[f"  part{i}[l.y * 32u + l.x] = a{i};" for i in r],
+        "  workgroupBarrier();",
+        "  if (l.y == 0u && n < p.N) {",
+        *[f"    if (t0 + {i}u < p.T) {{ var s = part{i}[l.x]; for (var j = 1u; j < 8u; j = j + 1u) {{ s = s + part{i}[j * 32u + l.x]; }} "
+          f"Y[(t0 + {i}u) * p.N + n] = s; }}" for i in r],
+        "  }",
+        "}"])
+
+
+SHADER_F16, SHADER_Q8 = _shader_f16(1), _shader_q8(1)
+TOKENS = 4  # tokens per workgroup when reading a prompt
+
+
+def _pick(kind: str, T: int) -> tuple[str, int]:
+    return (kind, 1 if T == 1 else TOKENS)
 
 CHUNK_BYTES = 120 << 20  # stay under the default 128 MB storage binding limit
 GROUP = 128  # rows per 8-bit scale
@@ -171,9 +193,10 @@ class GPU:
             "max-storage-buffer-binding-size": lim["max-storage-buffer-binding-size"],
             "max-buffer-size": lim["max-buffer-size"]})
         self.max_bind = min(lim["max-storage-buffer-binding-size"], CHUNK_BYTES)
-        self.pipelines = {kind: self.device.create_compute_pipeline(layout="auto", compute={
-            "module": self.device.create_shader_module(code=code), "entry_point": "main"})
-            for kind, code in (("f16", SHADER_F16), ("q8", SHADER_Q8))}
+        # (kind, tokens per workgroup) -> pipeline
+        self.pipelines = {(kind, tt): self.device.create_compute_pipeline(layout="auto", compute={
+            "module": self.device.create_shader_module(code=make(tt)), "entry_point": "main"})
+            for kind, make in (("f16", _shader_f16), ("q8", _shader_q8)) for tt in (1, TOKENS)}
         self.mats: dict[str, dict] = {}
         self._steps: dict[str, dict] = {}  # name -> reusable buffers for one-token steps
         self.lock = threading.Lock()  # steps run in worker threads
@@ -236,7 +259,7 @@ class GPU:
         if T == 1 and name in self._steps:  # generation: the same shapes every token
             return self._steps[name]["x"], self._steps[name]["chunks"]
         wgpu, dev, m = self.wgpu, self.device, self.mats[name]
-        pipe = self.pipelines[m["kind"]]
+        pipe = self.pipelines[_pick(m["kind"], T)]
         xbuf = dev.create_buffer(size=max(16, T * (-(-m["K"] // GROUP) * GROUP) * 4),
                                  usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
         made, chunks = [xbuf], []
@@ -281,9 +304,10 @@ class GPU:
                 dev.queue.write_buffer(xbuf, 0, x.tobytes())
             for c, out, read, bind, size in chunks:
                 pas = enc.begin_compute_pass()
-                pas.set_pipeline(self.pipelines[m["kind"]])
+                kind = _pick(m["kind"], T)
+                pas.set_pipeline(self.pipelines[kind])
                 pas.set_bind_group(0, bind)
-                pas.dispatch_workgroups((c["units"] + 31) // 32, T, 1)
+                pas.dispatch_workgroups((c["units"] + 31) // 32, -(-T // kind[1]), 1)
                 pas.end()
                 enc.copy_buffer_to_buffer(out, 0, read, 0, size)
                 jobs.append((name, c, read))

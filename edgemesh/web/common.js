@@ -55,7 +55,7 @@ async function deviceIdentity() {
 
 // ================================================================ usage limits editor (used for every device)
 
-const DEFAULT_LIMITS = { cpu: 80, schedule: [], always: false, gpu: true, cores: null, battery: null, charging: null };
+const DEFAULT_LIMITS = { cpu: 80, schedule: [], always: false, gpu: true, gpu_limit: null, awake: false, cores: null, battery: null, charging: null };
 
 // cores a browser worker can use (worker.js keeps one free for the page)
 const browserCores = () => (typeof Worker === "undefined" ? 1 : Math.max(1, Math.min(16, (navigator.hardwareConcurrency || 2) - 1)));
@@ -105,8 +105,19 @@ function limitEditor(limits, onChange, opts = {}) {
   };
   drawCores();
 
+  // GPU: its own limit, or the same as the CPU's
+  const gshow = (v) => (v == null ? "same as CPU" : v ? `${v}%` : "paused");
+  const gpct = el("span", { class: "pct" }, gshow(cur.gpu_limit));
+  const gslider = el("input", { type: "range", min: 0, max: 100, step: 5, value: cur.gpu_limit ?? cur.cpu, "aria-label": "GPU usage limit",
+    disabled: cur.gpu_limit == null ? "" : null,
+    oninput: (e) => { cur.gpu_limit = +e.target.value; gpct.textContent = gshow(cur.gpu_limit); emit(); } });
+  const gsame = check(cur.gpu_limit == null, "Same as CPU", (on) => {
+    cur.gpu_limit = on ? null : cur.cpu; gslider.disabled = on; gslider.value = cur.gpu_limit ?? cur.cpu; gpct.textContent = gshow(cur.gpu_limit); emit();
+  });
+
   return el("div", { class: "limitbox" },
     el("div", { class: "row" }, el("span", { class: "small muted" }, opts.label || "Usage limit"), slider, pct),
+    el("div", { class: "row wrap" }, el("span", { class: "small muted" }, "GPU limit"), gslider, gpct, gsame),
     coreRow,
     el("div", { class: "row wrap" },
       el("button", { class: "small", type: "button", onclick: () => set(100) }, "100%"),
@@ -114,7 +125,8 @@ function limitEditor(limits, onChange, opts = {}) {
       el("button", { class: "small", type: "button", onclick: () => set(50) }, "50%"),
       el("button", { class: "small", type: "button", onclick: () => set(0) }, "Pause"),
       check(cur.always, "Always use", (on) => { cur.always = on; emit(); }, "keep it in the split even when the mesh would be faster without it"),
-      check(cur.gpu, "Use GPU", (on) => { cur.gpu = on; emit(); }, "use the graphics chip when it is faster than the CPU")),
+      check(cur.gpu, "Use GPU", (on) => { cur.gpu = on; emit(); }, "use the graphics chip when it is faster than the CPU"),
+      opts.awake ? check(cur.awake, "Keep awake", (on) => { cur.awake = on; emit(); }, "keep this computer from sleeping while it helps (the screen can still turn off)") : null),
     el("details", { class: "more", open: opts.open || cur.schedule.length || cur.battery || cur.charging ? true : null },
       el("summary", { class: "small" }, "Battery and time of day"),
       powerRule("battery", "On battery:", { cpu: 30, cores: 2 }),

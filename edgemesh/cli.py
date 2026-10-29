@@ -28,13 +28,13 @@ def _mesh_key(given: str | None, save: bool = False) -> str:
     HOME.mkdir(parents=True, exist_ok=True)
     f = HOME / "mesh.key"
     if given:
-        if save and (not f.exists() or f.read_text().strip() != given):
+        if save and (not f.exists() or f.read_text(encoding="utf-8").strip() != given):
             f.write_text(given)
             print(f"  Saved {given!r} as this computer's mesh key; it stays until you change it again.")
         return given
     if not f.exists():
         f.write_text(secrets.token_urlsafe(18))
-    return f.read_text().strip()
+    return f.read_text(encoding="utf-8").strip()
 
 
 def _lan_ip() -> str:
@@ -341,6 +341,37 @@ async def _keep_addresses(hub, args, tunnel) -> None:
 CUDA_INDEX = "https://download.pytorch.org/whl/cu126"
 
 
+def cmd_limits(args) -> None:
+    """Show or change this device's usage limits, also while it contributes in the background."""
+    from . import limits as L
+
+    files = sorted(HOME.glob("limits-*.json"))
+    if not files:
+        sys.exit("This device isn't contributing yet (no limits saved). Start with: edgemesh contribute LINK")
+    change = {}
+    if args.cpu is not None:
+        change["cpu"] = args.cpu
+    if args.gpu is not None:
+        change["gpu_limit"] = None if args.gpu.lower() in ("same", "cpu") else int(args.gpu.rstrip("%"))
+    if args.cores is not None:
+        change["cores"] = None if args.cores.lower() == "all" else int(args.cores)
+    if args.awake is not None:
+        change["awake"] = args.awake == "on"
+    for f in files:
+        store = L.LimitStore(f)
+        if change:
+            try:
+                store.set({**store.limits, **change})
+            except ValueError as e:
+                sys.exit(str(e))
+        lim = store.limits
+        gpu = "same as CPU" if lim.get("gpu_limit") is None else f"{lim['gpu_limit']}%"
+        print(f"{f.stem[len('limits-'):]}: CPU {lim['cpu']}%, GPU {gpu}, cores {lim.get('cores') or f'all {os.cpu_count()}'}, "
+              f"keep awake {'on' if lim.get('awake') else 'off'}")
+    if change:
+        print("Applied; a running EdgeMesh picks it up within a few seconds.")
+
+
 def cmd_gpu(args) -> None:
     """Show which GPU EdgeMesh uses and how fast it is; --install-cuda adds NVIDIA CUDA support."""
     import subprocess
@@ -453,13 +484,18 @@ def cmd_contribute(args) -> None:
     if not key:
         sys.exit("The link needs a key (…/contribute?c=KEY or …/?k=KEY).")
     name = args.name or f"{socket.gethostname()[:20]}-{secrets.token_hex(2)}"
-    extra = []
-    if args.cpu is not None:
-        extra += ["--cpu", str(args.cpu)]
+    # limits go in this device's limits file rather than the autostart command, so that
+    # `edgemesh limits` and the main device can change them for good
+    from . import limits as L
+
+    overrides = {k: v for k, v in (("cpu", args.cpu), ("cores", args.cores)) if v is not None}
     if args.schedule:
-        extra += ["--schedule", args.schedule]
-    if args.cores:
-        extra += ["--cores", str(args.cores)]
+        overrides["schedule"] = L.parse_schedule(args.schedule)
+    if args.awake:
+        overrides["awake"] = True
+    if overrides:
+        L.LimitStore(HOME / f"limits-{name}.json", overrides)
+    extra = []
     from .crypto import is_contribute_key
 
     if url == "beacon:":  # a permanent link or a bare code: keep it, the host's address is looked up
@@ -579,6 +615,7 @@ def parser() -> argparse.ArgumentParser:
     b.add_argument("--stop", action="store_true", help="stop contributing and remove the autostart entry")
     b.add_argument("--uninstall", action="store_true", help="stop, remove autostart, and delete what the installer added")
     b.add_argument("--no-autostart", action="store_true", help="don't start again at login")
+    b.add_argument("--awake", action="store_true", help="keep this computer from sleeping while it contributes")
     for sp in (h, j, b):
         sp.add_argument("--cpu", type=int, help="usage limit in percent (default 80; 0 = paused)")
         sp.add_argument("--schedule", help='time-of-day limits, e.g. "22:00-07:00=100,09:00-17:00=0"')
@@ -598,6 +635,12 @@ def parser() -> argparse.ArgumentParser:
 
     g = sub.add_parser("gpu", help="show the GPU EdgeMesh uses and its speed")
     g.add_argument("--install-cuda", action="store_true", help="install CUDA support for NVIDIA cards (PyTorch)")
+
+    li = sub.add_parser("limits", help="show or change how much of this device EdgeMesh may use")
+    li.add_argument("--cpu", type=int, help="usage limit in percent (0 = paused)")
+    li.add_argument("--gpu", help='GPU usage limit in percent, or "same" to follow the CPU limit')
+    li.add_argument("--cores", help='CPU cores to use, or "all"')
+    li.add_argument("--awake", choices=["on", "off"], help="keep this computer from sleeping while it contributes")
 
     lk = sub.add_parser("links", help="show this computer's mesh key and join links")
     lk.add_argument("--key", help=argparse.SUPPRESS)
@@ -627,7 +670,7 @@ def main(argv: list[str] | None = None) -> None:
                         format="%(asctime)s %(name)s %(message)s")
     fn = {"host": cmd_host, "join": cmd_join, "contribute": cmd_contribute, "run": cmd_run, "status": cmd_status,
           "make-model": cmd_make_model, "pull": cmd_pull,
-          "links": cmd_links, "gpu": cmd_gpu}[args.cmd]
+          "links": cmd_links, "gpu": cmd_gpu, "limits": cmd_limits}[args.cmd]
     try:
         if asyncio.iscoroutinefunction(fn):
             asyncio.run(fn(args))

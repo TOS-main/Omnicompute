@@ -10,6 +10,11 @@ Optional power rules (phones and laptops):
     "battery":  {"cpu": 30, "cores": 2}   on battery: use at most this much
     "charging": {"cpu": 100, "cores": 6}  plugged in: use this instead of the default
 
+"gpu_limit" is a separate usage limit for the GPU (null = the same as "cpu"); time windows and
+battery rules still cap it.
+
+"awake": true keeps the computer from sleeping while EdgeMesh runs (see awake.py).
+
 "cores" caps how many CPU cores a browser worker uses at once (null = its default);
 "gpu": false keeps a device on its CPU even when it has a usable GPU.
 
@@ -64,7 +69,9 @@ def _cores(v):
 
 def validate(limits: dict) -> dict:
     out = {"cpu": _pct(limits.get("cpu", DEFAULT["cpu"])), "schedule": [], "always": bool(limits.get("always", False)),
-           "gpu": bool(limits.get("gpu", True)), "cores": _cores(limits.get("cores"))}
+           "gpu": bool(limits.get("gpu", True)), "cores": _cores(limits.get("cores")),
+           "awake": bool(limits.get("awake", False)),
+           "gpu_limit": None if limits.get("gpu_limit") in (None, "") else _pct(limits["gpu_limit"])}
     for w in limits.get("schedule") or []:
         _minutes(w["from"]), _minutes(w["to"])
         out["schedule"].append({"from": w["from"].strip(), "to": w["to"].strip(), "cpu": _pct(w["cpu"])})
@@ -103,6 +110,15 @@ def effective(limits: dict, now: datetime | None = None, power: str | None = Non
     return cpu, why
 
 
+def effective_for(limits: dict, gpu: bool, now: datetime | None = None, power: str | None = None) -> tuple[int, str]:
+    """Like effective(), for the engine the device computes with now (GPU or CPU)."""
+    cpu, why = effective(limits, now, power)
+    g = limits.get("gpu_limit")
+    if not gpu or g is None:
+        return cpu, why
+    return (g, "GPU limit") if why == "default" else (min(g, cpu), why)
+
+
 def effective_cores(limits: dict, power: str | None = None) -> int | None:
     """Most CPU cores to use at once now (None = the device's default)."""
     cores = limits.get("cores")
@@ -134,11 +150,11 @@ def power_state() -> str | None:
             if "InternalBattery" not in out:
                 return None
             return "charging" if "AC Power" in out else "battery"
-        batteries = [b for b in glob.glob("/sys/class/power_supply/*") if Path(b, "type").read_text().strip() == "Battery"]
+        batteries = [b for b in glob.glob("/sys/class/power_supply/*") if Path(b, "type").read_text(encoding="utf-8").strip() == "Battery"]
         if not batteries:
             return None
         for ac in glob.glob("/sys/class/power_supply/*"):
-            if Path(ac, "type").read_text().strip() == "Mains" and Path(ac, "online").read_text().strip() == "1":
+            if Path(ac, "type").read_text(encoding="utf-8").strip() == "Mains" and Path(ac, "online").read_text(encoding="utf-8").strip() == "1":
                 return "charging"
         return "battery"
     except Exception:
@@ -158,10 +174,8 @@ class LimitStore:
     def __init__(self, path: Path, initial: dict | None = None):
         self.path = path
         self.limits = dict(DEFAULT)
-        try:
-            self.limits = validate(json.loads(path.read_text()))
-        except (OSError, ValueError, KeyError):
-            pass
+        self._mtime = None
+        self.reload_if_changed()
         if initial:  # command-line flags override what was saved
             self.set({**self.limits, **initial})
 
@@ -170,6 +184,18 @@ class LimitStore:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(json.dumps(self.limits))
+            self._mtime = self.path.stat().st_mtime_ns
         except OSError:
             pass
         return self.limits
+
+    def reload_if_changed(self) -> bool:
+        """Pick up a change made on this device (`edgemesh limits ...`) while it runs."""
+        try:
+            m = self.path.stat().st_mtime_ns
+            if m == self._mtime:
+                return False
+            self.limits, self._mtime = validate(json.loads(self.path.read_text(encoding="utf-8"))), m
+            return True
+        except (OSError, ValueError, KeyError):
+            return False

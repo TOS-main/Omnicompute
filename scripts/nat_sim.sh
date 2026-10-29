@@ -12,7 +12,7 @@ set -euo pipefail
 PY=${PY:-python3}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 LOGS=${LOGS:-$(mktemp -d)}
-KEY=simkey
+KEY=simkey-0001
 
 cleanup() {
   for p in $(jobs -p); do kill "$p" 2>/dev/null || true; done
@@ -46,7 +46,7 @@ router home1 10.0.0.2 laptop 192.168.1 0
 router home2 10.0.0.3 desktop 192.168.2 0
 router cell 10.0.0.4 phone 100.64.0 1
 
-export PYTHONPATH="$ROOT" EDGEMESH_HOME="$LOGS/home"
+export PYTHONPATH="$ROOT" EDGEMESH_HOME="$LOGS/home" EDGEMESH_BEACON=off
 ip netns exec wan $PY -m edgemesh -v host --key $KEY --no-worker --port 8000 >"$LOGS/hub.log" 2>&1 &
 sleep 2
 declare -A SCORE=([laptop]=2 [desktop]=1 [phone]=3)  # chain laptop -> desktop -> phone (the fastest goes last)

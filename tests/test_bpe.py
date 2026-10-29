@@ -14,7 +14,7 @@ from edgemesh.bpe import LLAMA3_SPLIT, QWEN2_SPLIT  # noqa: E402
 from edgemesh.hf import pick_gguf  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ((ROOT / "README.md").read_text() + (ROOT / "edgemesh" / "hub.py").read_text()
+CORPUS = ((ROOT / "README.md").read_text(encoding="utf-8") + (ROOT / "edgemesh" / "hub.py").read_text(encoding="utf-8")
           + " Héllo wörld, naïve café 東京 タワー Привет мир 12345 3.14159 don't I'll we've ✓✱ 🚀🔥\n\n\t tabs  double  spaces")
 TESTS = ["Hello world!", "  leading spaces and trailing  ", "don't stop, I'LL go; we've 12345678 apples",
          "東京タワー Привет, мир! naïve café", "line1\nline2\r\n\n  indented\ttab", "emoji 🚀🔥 and ✓",
@@ -41,7 +41,7 @@ def _train(kind, split, path):
         tok.post_processor = processors.TemplateProcessing(single="<s> $A", special_tokens=[("<s>", tok.token_to_id("<s>"))])
     tok.save(str(path))
     if kind == "spm":  # like real SentencePiece vocabularies: no word start inside a token
-        tj = json.loads(path.read_text())
+        tj = json.loads(path.read_text(encoding="utf-8"))
         tj["model"]["merges"] = [m for m in tj["model"]["merges"]
                                  if re.fullmatch("▁*[^▁]*", "".join(m) if isinstance(m, list) else m.replace(" ", ""))]
         path.write_text(json.dumps(tj))

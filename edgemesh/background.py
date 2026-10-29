@@ -63,7 +63,7 @@ def stop(home: Path, quiet: bool = False, keep_autostart: bool = False) -> bool:
     stopped = False
     if pid_file.exists():
         try:
-            pid = int(pid_file.read_text().strip())
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
             if platform.system() == "Windows":
                 subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
             else:

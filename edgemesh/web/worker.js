@@ -153,6 +153,8 @@ function effectiveLimit() {
   }
   if (!inWindow && power === "charging" && limits.charging) { cpu = limits.charging.cpu; why = "charging"; }
   if (power === "battery" && limits.battery && limits.battery.cpu < cpu) { cpu = limits.battery.cpu; why = "on battery"; }
+  const g = limits.gpu_limit;  // separate GPU limit (null = same as the CPU's); windows and battery still cap it
+  if (g != null && wantGpu()) return why === "default" ? [g, "GPU limit"] : [Math.min(g, cpu), why];
   return [cpu, why];
 }
 

@@ -4,65 +4,83 @@
 
 "use strict";
 
-const GPU_SHADER = `
-struct P { K: u32, N2: u32, T: u32, pad: u32 };
-@group(0) @binding(0) var<storage, read> W: array<u32>;
-@group(0) @binding(1) var<storage, read> X: array<f32>;
-@group(0) @binding(2) var<storage, read_write> Y: array<vec2<f32>>;
-@group(0) @binding(3) var<uniform> p: P;
-var<workgroup> part: array<vec2<f32>, 256>;
+// Same generators as edgemesh/gpu.py: one token per workgroup (each new token while answering)
+// or four (reading a prompt, so every weight is read once per four tokens). Accumulators are
+// separate variables so they stay in registers.
+const range = (n) => [...Array(n).keys()];
+const sumOut = (tt, N) => range(tt).map((i) => `    if (t0 + ${i}u < p.T) { var s = part${i}[l.x]; for (var j = 1u; j < 8u; j = j + 1u) { s = s + part${i}[j * 32u + l.x]; } Y[(t0 + ${i}u) * p.${N} + n] = s; }`);
 
-// 32 column pairs per workgroup, each summed by 8 threads over every 8th row, so a GPU's
-// thousands of threads all stay busy even on small matrices.
-@compute @workgroup_size(32, 8)
-fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
-  let n = wg.x * 32u + l.x;
-  let t = wg.y;
-  var acc = vec2<f32>(0.0, 0.0);
-  if (n < p.N2) {
-    let xo = t * p.K;
-    for (var k = l.y; k < p.K; k = k + 8u) {
-      acc = acc + X[xo + k] * unpack2x16float(W[k * p.N2 + n]);
-    }
-  }
-  part[l.y * 32u + l.x] = acc;
-  workgroupBarrier();
-  if (l.y == 0u && n < p.N2) {
-    var s = part[l.x];
-    for (var i = 1u; i < 8u; i = i + 1u) { s = s + part[i * 32u + l.x]; }
-    Y[t * p.N2 + n] = s;
-  }
-}`;
+// float16 weights: each u32 holds two neighbouring columns of one row; 32 column pairs per
+// workgroup, each summed by 8 threads over every 8th row
+function shaderF16(tt) {
+  const r = range(tt);
+  return [
+    "struct P { K: u32, N2: u32, T: u32, pad: u32 };",
+    "@group(0) @binding(0) var<storage, read> W: array<u32>;",
+    "@group(0) @binding(1) var<storage, read> X: array<f32>;",
+    "@group(0) @binding(2) var<storage, read_write> Y: array<vec2<f32>>;",
+    "@group(0) @binding(3) var<uniform> p: P;",
+    ...r.map((i) => `var<workgroup> part${i}: array<vec2<f32>, 256>;`),
+    "@compute @workgroup_size(32, 8)",
+    "fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {",
+    "  let n = wg.x * 32u + l.x;",
+    `  let t0 = wg.y * ${tt}u;`,
+    ...r.map((i) => `  let x${i} = min(t0 + ${i}u, p.T - 1u) * p.K;`),
+    ...r.map((i) => `  var a${i} = vec2<f32>(0.0, 0.0);`),
+    "  if (n < p.N2) {",
+    "    for (var k = l.y; k < p.K; k = k + 8u) {",
+    "      let w = unpack2x16float(W[k * p.N2 + n]);",
+    ...r.map((i) => `      a${i} = a${i} + X[x${i} + k] * w;`),
+    "    }",
+    "  }",
+    ...r.map((i) => `  part${i}[l.y * 32u + l.x] = a${i};`),
+    "  workgroupBarrier();",
+    "  if (l.y == 0u && n < p.N2) {",
+    ...sumOut(tt, "N2"),
+    "  }",
+    "}"].join("\n");
+}
 
-// 8-bit weights: 4 rows of one column per u32, one scale per 128 rows (see edgemesh/gpu.py)
-const GPU_SHADER_Q8 = `
-struct P { K4: u32, N: u32, T: u32, G4: u32 };
-@group(0) @binding(0) var<storage, read> W: array<u32>;
-@group(0) @binding(1) var<storage, read> X: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read_write> Y: array<f32>;
-@group(0) @binding(3) var<uniform> p: P;
-@group(0) @binding(4) var<storage, read> S: array<f32>;
-var<workgroup> part: array<f32, 256>;
-
-@compute @workgroup_size(32, 8)
-fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
-  let n = wg.x * 32u + l.x;
-  let t = wg.y;
-  var acc = 0.0;
-  if (n < p.N) {
-    let xo = t * p.K4;
-    for (var k = l.y; k < p.K4; k = k + 8u) {
-      acc = acc + dot(X[xo + k], unpack4x8snorm(W[k * p.N + n])) * S[(k / p.G4) * p.N + n];
-    }
-  }
-  part[l.y * 32u + l.x] = acc;
-  workgroupBarrier();
-  if (l.y == 0u && n < p.N) {
-    var s = part[l.x];
-    for (var i = 1u; i < 8u; i = i + 1u) { s = s + part[i * 32u + l.x]; }
-    Y[t * p.N + n] = s;
-  }
-}`;
+// 8-bit weights: 4 rows of one column per u32, one scale per 128 rows; each of a column's 8
+// threads takes whole scale groups, so it reads each scale once per group
+function shaderQ8(tt) {
+  const r = range(tt);
+  return [
+    "struct P { K4: u32, N: u32, T: u32, G4: u32 };",
+    "@group(0) @binding(0) var<storage, read> W: array<u32>;",
+    "@group(0) @binding(1) var<storage, read> X: array<vec4<f32>>;",
+    "@group(0) @binding(2) var<storage, read_write> Y: array<f32>;",
+    "@group(0) @binding(3) var<uniform> p: P;",
+    "@group(0) @binding(4) var<storage, read> S: array<f32>;",
+    ...r.map((i) => `var<workgroup> part${i}: array<f32, 256>;`),
+    "@compute @workgroup_size(32, 8)",
+    "fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {",
+    "  let n = wg.x * 32u + l.x;",
+    `  let t0 = wg.y * ${tt}u;`,
+    ...r.map((i) => `  let x${i} = min(t0 + ${i}u, p.T - 1u) * p.K4;`),
+    ...r.map((i) => `  var a${i} = 0.0;`),
+    "  if (n < p.N) {",
+    "    let groups = p.K4 / p.G4;",
+    "    for (var g = l.y; g < groups; g = g + 8u) {",
+    ...r.map((i) => `      var s${i} = 0.0;`),
+    "      let k0 = g * p.G4;",
+    "      for (var k = k0; k < k0 + p.G4; k = k + 1u) {",
+    "        let w = unpack4x8snorm(W[k * p.N + n]);",
+    ...r.map((i) => `        s${i} = s${i} + dot(X[x${i} + k], w);`),
+    "      }",
+    "      let sc = S[g * p.N + n];",
+    ...r.map((i) => `      a${i} = a${i} + s${i} * sc;`),
+    "    }",
+    "  }",
+    ...r.map((i) => `  part${i}[l.y * 32u + l.x] = a${i};`),
+    "  workgroupBarrier();",
+    "  if (l.y == 0u && n < p.N) {",
+    ...sumOut(tt, "N"),
+    "  }",
+    "}"].join("\n");
+}
+const GPU_TOKENS = 4; // tokens per workgroup when reading a prompt
+const gpuKind = (kind, T) => `${kind}${T === 1 ? 1 : GPU_TOKENS}`;
 
 // float32 -> float16 bits (round to nearest even)
 const _f32 = new Float32Array(1), _u32 = new Uint32Array(_f32.buffer);
@@ -101,7 +119,8 @@ class GpuPool {
   constructor(device, name, maxBind) {
     this.device = device; this.name = name; this.maxBind = maxBind;
     const pipe = (code) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
-    this.pipelines = { f16: pipe(GPU_SHADER), q8: pipe(GPU_SHADER_Q8) };
+    this.pipelines = {}; // "f16"/"q8" + tokens per workgroup -> pipeline
+    for (const tt of [1, GPU_TOKENS]) { this.pipelines[`f16${tt}`] = pipe(shaderF16(tt)); this.pipelines[`q8${tt}`] = pipe(shaderQ8(tt)); }
     this.bits = 8; // 8-bit weights: half the memory reads of float16, so about twice as fast
     this.mats = new Map();
     this.lost = false;
@@ -170,7 +189,7 @@ class GpuPool {
   buffers(name, T) {
     const m = this.mats.get(name);
     if (T === 1 && m.step) return m.step;
-    const dev = this.device, pipe = this.pipelines[m.kind];
+    const dev = this.device, pipe = this.pipelines[gpuKind(m.kind, T)];
     const xbuf = dev.createBuffer({ size: Math.max(16, T * m.padK * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     const all = [xbuf], chunks = [];
     for (const c of m.chunks) {
@@ -202,9 +221,9 @@ class GpuPool {
     const enc = dev.createCommandEncoder();
     for (const { c, out, read, bind, size } of set.chunks) {
       const pass = enc.beginComputePass();
-      pass.setPipeline(this.pipelines[m.kind]);
+      pass.setPipeline(this.pipelines[gpuKind(m.kind, T)]);
       pass.setBindGroup(0, bind);
-      pass.dispatchWorkgroups(Math.ceil(c.units / 32), T, 1);
+      pass.dispatchWorkgroups(Math.ceil(c.units / 32), Math.ceil(T / (T === 1 ? 1 : GPU_TOKENS)), 1);
       pass.end();
       enc.copyBufferToBuffer(out, 0, read, 0, size);
     }
@@ -243,4 +262,4 @@ class GpuPool {
   }
 }
 
-if (typeof module !== "undefined") module.exports = { toHalf };
+if (typeof module !== "undefined") module.exports = { toHalf, shaderF16, shaderQ8 };

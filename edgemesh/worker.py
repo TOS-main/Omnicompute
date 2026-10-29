@@ -111,11 +111,11 @@ class Worker:
 
     def limit_info(self) -> dict:
         limits = self.limits.limits if self.limits else dict(L.DEFAULT)
-        cpu, why = L.effective(limits, power=self.power)
+        gpu = self.node is not None and "cpu_score" in self.node.info and self.use_gpu()
+        cpu, why = L.effective_for(limits, gpu, power=self.power)
         out = {"limit": cpu, "limit_reason": why, "limits": limits, "power": self.power,
                "cores": L.effective_cores(limits, self.power)}
         if self.node is not None and "cpu_score" in self.node.info:
-            gpu = self.use_gpu()
             out["uses"] = "gpu" if gpu else "cpu"
             total = self.node.info.get("cores_total") or 1
             share = min(out["cores"], total) / total if out["cores"] else 1  # fewer cores, less speed
@@ -131,13 +131,20 @@ class Worker:
             await self.node.update_info(info)
 
     async def watch_schedule(self) -> None:
-        """Re-check the schedule every 20 s and tell the hub when the limit in force changes."""
+        """Re-check the schedule (and the limits file, which `edgemesh limits` changes) every few
+        seconds, and tell the hub when the limit in force changes."""
         while True:
             try:
+                if self.limits is not None:
+                    self.limits.reload_if_changed()
+                    if self.node is not None and self.node.info.get("kind") == "native":
+                        from .awake import set_awake
+
+                        set_awake(bool(self.limits.limits.get("awake")))
                 await self.report_limits()
             except Exception as e:  # hub connection gone: the reconnect loop takes over
                 log.debug("could not report limits: %s", e)
-            await asyncio.sleep(20)
+            await asyncio.sleep(5)
 
     async def handle(self, peer_id: str, header: dict, payload: bytes):
         op = header.get("op")

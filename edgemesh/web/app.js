@@ -107,7 +107,7 @@ function renderDevices() {
     c.platform.textContent = d.platform || "";
     if (!c.card.contains(document.activeElement) && JSON.stringify(d.limits) !== c.lastLimits) {
       c.lastLimits = JSON.stringify(d.limits);
-      c.limitSlot.replaceChildren(limitEditor(d.limits, (l) => setRemoteLimits(d.node_id, l, c), { cores: d.cores_total }));
+      c.limitSlot.replaceChildren(limitEditor(d.limits, (l) => setRemoteLimits(d.node_id, l, c), { cores: d.cores_total, awake: d.kind === "native" }));
     }
   }
   for (const [id, c] of cards) if (!seen.has(id)) { c.card.remove(); cards.delete(id); }

@@ -86,6 +86,9 @@ if (-not $py) {
 
 $Cores = $env:EDGEMESH_CORES
 if (-not $Cores -and $env:EDGEMESH_YES -ne "1") { $Cores = Read-Host "This computer has $CoresAll CPU cores. How many should EdgeMesh use? [all]" }
+$Awake = $env:EDGEMESH_AWAKE
+if (-not $Awake -and $env:EDGEMESH_YES -ne "1") { $Awake = Read-Host "Keep this computer from going to sleep while it helps (the screen can still turn off)? [y/N]" }
+$awakeArgs = if ("$Awake" -match "^[yY1]") { @("--awake") } else { @() }
 $n = 0
 if (-not ([int]::TryParse("$Cores", [ref]$n)) -or $n -lt 1 -or $n -ge $CoresAll) { $n = 0 }
 
@@ -139,9 +142,10 @@ if (-not $Join) {
   & $exe host --public @coreArgs
   return
 }
-& $vpy -m edgemesh contribute $Join @coreArgs
+& $vpy -m edgemesh contribute $Join @coreArgs @awakeArgs
 Write-Host ""
 Write-Host "Done. This computer now shows up in the main device's Devices tab, from any network."
 Write-Host "Usage limit is 80% by default; change it and the cores there. On this computer:"
+Write-Host "  change:     & `"$venv\Scripts\edgemesh.exe`" limits --cpu 50 --gpu 80 --cores 4 --awake on"
 Write-Host "  pause:      & `"$venv\Scripts\edgemesh.exe`" contribute --stop"
 Write-Host "  uninstall:  & `"$venv\Scripts\edgemesh.exe`" contribute --uninstall"

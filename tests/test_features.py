@@ -309,7 +309,7 @@ async def test_background_contributor_starts_and_stops(model_file, tmp_path, mon
                 break
             await asyncio.sleep(0.1)
         assert hub.clients["bg-box"].contributor
-        desktop = (cfgdir / "autostart" / "edgemesh.desktop").read_text()
+        desktop = (cfgdir / "autostart" / "edgemesh.desktop").read_text(encoding="utf-8")
         assert "NoDisplay=true" in desktop and (home / "contribute.sh").exists()
         subprocess.run([sys.executable, "-m", "edgemesh", "contribute", "--stop"], env=env, check=True, timeout=30)
         for _ in range(300):
@@ -317,7 +317,7 @@ async def test_background_contributor_starts_and_stops(model_file, tmp_path, mon
                 break
             await asyncio.sleep(0.1)
         assert "bg-box" not in hub.clients and not (cfgdir / "autostart" / "edgemesh.desktop").exists()
-        assert "joined" in (home / "contribute.log").read_text()
+        assert "joined" in (home / "contribute.log").read_text(encoding="utf-8")
     finally:
         for n in nodes:
             await n.close()
@@ -436,13 +436,13 @@ def test_permanent_link_pieces_and_github_installers():
     """The beacon script is the same on the web page and the GitHub Pages permanent link, and the
     installers run straight from GitHub with just a code (no main device on the same network)."""
     root = Path(__file__).resolve().parent.parent
-    assert (root / "docs" / "beacon.js").read_text() == (root / "edgemesh" / "web" / "beacon.js").read_text()
+    assert (root / "docs" / "beacon.js").read_text(encoding="utf-8") == (root / "edgemesh" / "web" / "beacon.js").read_text(encoding="utf-8")
     for name in ("install.sh", "termux-host.sh"):
-        text = (root / "edgemesh" / "installers" / name).read_text()
+        text = (root / "edgemesh" / "installers" / name).read_text(encoding="utf-8")
         assert "EDGEMESH_CODE" in text and "archive/refs/heads/main.zip" in text
-    ps = (root / "edgemesh" / "installers" / "install.ps1").read_text()
+    ps = (root / "edgemesh" / "installers" / "install.ps1").read_text(encoding="utf-8")
     assert "EDGEMESH_CODE" in ps and "archive/refs/heads/main.zip" in ps and "--cores" in ps
-    assert "--cores" in (root / "edgemesh" / "installers" / "install.sh").read_text()
+    assert "--cores" in (root / "edgemesh" / "installers" / "install.sh").read_text(encoding="utf-8")
 
 
 def test_cores_flag_is_saved_and_scales_the_score(tmp_path):
@@ -463,7 +463,7 @@ def test_install_sh_from_github_downloads_the_repo(tmp_path):
            "EDGEMESH_CODE": "c" + "ab" * 12, "EDGEMESH_REPO": "someone/fork"}
     out = subprocess.run(["sh", str(script)], env=env, capture_output=True, text=True, timeout=60)
     assert "Downloading EdgeMesh from GitHub (someone/fork)" in out.stdout
-    assert "https://github.com/someone/fork/archive/refs/heads/main.zip" in (tmp_path / "curl-args").read_text()
+    assert "https://github.com/someone/fork/archive/refs/heads/main.zip" in (tmp_path / "curl-args").read_text(encoding="utf-8")
 
 
 def test_android_entry_point_hosts_and_stops(tmp_path, monkeypatch):
@@ -494,9 +494,41 @@ def test_android_entry_point_hosts_and_stops(tmp_path, monkeypatch):
             except OSError:
                 time.sleep(0.1)
         else:
-            raise AssertionError((tmp_path / ".edgemesh" / "host.log").read_text())
+            raise AssertionError((tmp_path / ".edgemesh" / "host.log").read_text(encoding="utf-8"))
         assert android.running() and android.mesh_key(str(tmp_path))
         assert "go.html#c=c" in android.permanent_link(str(tmp_path))
     finally:
         android.stop()
     assert not android.running()
+
+
+def test_gpu_limit_and_changing_limits_from_the_command_line(tmp_path, monkeypatch, capsys):
+    from edgemesh import cli
+    from edgemesh import limits as L
+
+    lim = L.validate({"cpu": 40, "gpu_limit": 90})
+    assert L.effective_for(lim, gpu=True) == (90, "GPU limit") and L.effective_for(lim, gpu=False)[0] == 40
+    night = L.validate({"cpu": 40, "gpu_limit": 90, "schedule": [{"from": "00:00", "to": "23:59", "cpu": 0}]})
+    assert L.effective_for(night, gpu=True)[0] == 0  # a pause window pauses the GPU too
+
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    running = L.LimitStore(tmp_path / "limits-desk.json", {"cpu": 80})
+    cli.main(["limits", "--cpu", "30", "--gpu", "70", "--cores", "4"])
+    assert "CPU 30%, GPU 70%, cores 4" in capsys.readouterr().out
+    assert running.reload_if_changed() and running.limits["cpu"] == 30 and running.limits["gpu_limit"] == 70
+    assert not running.reload_if_changed()
+    cli.main(["limits", "--gpu", "same", "--cores", "all"])
+    running.reload_if_changed()
+    assert running.limits["gpu_limit"] is None and running.limits["cores"] is None
+
+
+def test_browser_and_native_gpu_shaders_are_the_same():
+    from edgemesh import gpu
+
+    js = Path(__file__).resolve().parent.parent / "edgemesh" / "web" / "gpu.js"
+    out = subprocess.run(["node", "-e", f"const g = require({str(js)!r}); console.log(JSON.stringify("
+                          "[1, 4].map((t) => [g.shaderF16(t), g.shaderQ8(t)])))"], capture_output=True, text=True)
+    if out.returncode:
+        import pytest
+        pytest.skip("node is not installed")
+    assert json.loads(out.stdout) == [[gpu._shader_f16(t), gpu._shader_q8(t)] for t in (1, 4)]

@@ -100,12 +100,12 @@ class HFSource:
 
     def __init__(self, folder: str | Path, name: str | None = None, dtype=np.float16):
         self.folder = Path(folder)
-        hf = json.loads((self.folder / "config.json").read_text())
+        hf = json.loads((self.folder / "config.json").read_text(encoding="utf-8"))
         self.hf_config = hf
         self.cfg = edgemesh_config(hf, name or self.folder.name)
         gen = self.folder / "generation_config.json"
         if gen.exists():  # the model author's suggested sampling settings, used as the web page's defaults
-            g = json.loads(gen.read_text())
+            g = json.loads(gen.read_text(encoding="utf-8"))
             self.cfg["gen_defaults"] = {k: g[k] for k in ("max_new_tokens", "temperature", "top_p") if k in g}
         self.st = _SafeTensors(self.folder)
         self.dtype = dtype
@@ -321,7 +321,7 @@ def _complete(folder: Path) -> bool:
         return False
     index = folder / "model.safetensors.index.json"
     if index.exists():
-        return all((folder / f).exists() for f in set(json.loads(index.read_text())["weight_map"].values()))
+        return all((folder / f).exists() for f in set(json.loads(index.read_text(encoding="utf-8"))["weight_map"].values()))
     return any(folder.glob("*.safetensors"))
 
 
