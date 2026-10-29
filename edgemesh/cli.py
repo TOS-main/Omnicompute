@@ -376,7 +376,9 @@ async def cmd_pull(args) -> None:
 
 
 def _interactive() -> list[str]:
-    print("EdgeMesh: run AI models across your devices.\n")
+    from . import __version__
+
+    print(f"EdgeMesh {__version__}: run AI models across your devices.\n")
     print("  1) Host a mesh on this computer (others join it)")
     print("  2) Join an existing mesh as a worker")
     choice = input("\nChoose 1 or 2: ").strip()
