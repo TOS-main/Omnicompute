@@ -29,7 +29,7 @@ from pathlib import Path
 
 log = logging.getLogger("omnicompute.llamacpp")
 
-RELEASES = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+RELEASES = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=8"
 EXE = "llama-server.exe" if os.name == "nt" else "llama-server"
 DEFAULTS = {"engine": "auto", "gpu_layers": "auto", "threads": 0, "flash_attn": True, "context": 8192}
 
@@ -72,14 +72,20 @@ def install(home: Path, progress=lambda text: None, cpu_only: bool = False) -> s
         headers["Authorization"] = f"Bearer {os.environ['GITHUB_TOKEN']}"
     req = urllib.request.Request(RELEASES, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as r:
-        rel = json.load(r)
-    assets = {a["name"]: a["browser_download_url"] for a in rel.get("assets", [])
-              if a["name"].endswith((".zip", ".tar.gz"))}
-    patterns = [p for p in asset_patterns() if not (cpu_only and "vulkan" in p)]
-    pick = next((n for p in patterns for n in assets if p in n and "cudart" not in n), None)
+        releases = json.load(r)
+    # the newest release whose builds are all uploaded (a release appears before its files do)
+    rel, pick, assets, seen = None, None, {}, []
+    for rel in releases:
+        assets = {a["name"]: a["browser_download_url"] for a in rel.get("assets", [])
+                  if a["name"].endswith((".zip", ".tar.gz"))}
+        seen = seen or sorted(assets)
+        patterns = [p for p in asset_patterns() if not (cpu_only and "vulkan" in p)]
+        pick = next((n for p in patterns for n in assets if p in n and "cudart" not in n), None)
+        if pick:
+            break
     if pick is None:
         raise RuntimeError(f"llama.cpp has no ready-made build for this computer ({platform.system()} "
-                           f"{platform.machine()}); its release has {', '.join(sorted(assets))[:600]}")
+                           f"{platform.machine()}); its releases have {', '.join(seen)[:600]}")
     dest = home / "llama.cpp"
     tmp = home / ("llama.cpp.zip" if pick.endswith(".zip") else "llama.cpp.tar.gz")
     home.mkdir(parents=True, exist_ok=True)
