@@ -1,5 +1,6 @@
 """Contribute-only key, GPU backend, power limits, shared chat, model management, installers."""
 
+import argparse
 import asyncio
 import io
 import json
@@ -349,3 +350,23 @@ async def test_host_moves_to_a_free_port_or_reuses_a_running_hub(model_file, mon
     finally:
         busy.close()
         await first.close()
+
+
+# ---------------------------------------------------------------- keys stay the same
+
+def test_join_links_survive_copy_paste():
+    assert parse_join_url('"http://10.0.0.5:8001/?k=abc_DEF-123".') == ("http://10.0.0.5:8001", "abc_DEF-123")
+    assert parse_join_url("<10.0.0.5:8000/contribute?c=c0123>") == ("http://10.0.0.5:8000", "c0123")
+
+
+def test_mesh_key_is_kept_and_can_be_set(tmp_path, monkeypatch, capsys):
+    from edgemesh import cli
+
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    first = cli._mesh_key(None)
+    assert cli._mesh_key(None) == first  # same key after a restart
+    assert cli._mesh_key("my-own-key-1", save=True) == "my-own-key-1"
+    assert cli._mesh_key(None) == "my-own-key-1"  # yours from then on
+    asyncio.run(cli.cmd_links(argparse.Namespace(key=None)))
+    out = capsys.readouterr().out
+    assert "?k=my-own-key-1" in out and "contribute?c=c" in out

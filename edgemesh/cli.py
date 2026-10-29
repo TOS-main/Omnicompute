@@ -22,11 +22,16 @@ log = logging.getLogger("edgemesh")
 HOME = Path(os.environ.get("EDGEMESH_HOME", Path.home() / ".edgemesh"))
 
 
-def _mesh_key(given: str | None) -> str:
-    if given:
-        return given
+def _mesh_key(given: str | None, save: bool = False) -> str:
+    """This computer's mesh key: made once and kept in ~/.edgemesh/mesh.key, so links and
+    installed devices keep working across restarts. `host --key NEW` replaces it for good."""
     HOME.mkdir(parents=True, exist_ok=True)
     f = HOME / "mesh.key"
+    if given:
+        if save and (not f.exists() or f.read_text().strip() != given):
+            f.write_text(given)
+            print(f"  Saved {given!r} as this computer's mesh key; it stays until you change it again.")
+        return given
     if not f.exists():
         f.write_text(secrets.token_urlsafe(18))
     return f.read_text().strip()
@@ -85,6 +90,10 @@ async def _run_worker(url: str, key: str, name: str, relay_only: bool, mem_fract
         except (OSError, PermissionError) as e:
             print(f"[{name}] could not join {url}: {e}", flush=True)
             if isinstance(e, PermissionError):
+                if "key" in str(e):
+                    print("  The key in this link doesn't match the main computer's. Copy the link again from the\n"
+                          "  main computer's window (or run  edgemesh links  there), and check the port number too:\n"
+                          "  a different EdgeMesh may be running on another port.", flush=True)
                 return
         finally:
             if watcher:
@@ -175,7 +184,8 @@ async def _start_on_free_port(hub, key: str, port: int) -> bool:
         try:
             await hub.start()
             if p != port:
-                print(f"  (port {port} is busy, so EdgeMesh is using port {p})")
+                print(f"  (port {port} is busy, so EdgeMesh is using port {p}. Use the links below: links that"
+                      f" say :{port} reach whatever else is running there)")
             return True
         except OSError as e:
             if e.errno not in PORT_TAKEN and getattr(e, "winerror", None) not in PORT_TAKEN:
@@ -194,13 +204,14 @@ async def _start_on_free_port(hub, key: str, port: int) -> bool:
 
 
 async def cmd_host(args) -> None:
+    from .crypto import is_contribute_key
     from .hub import Hub
 
-    key = _mesh_key(args.key)
-    from .crypto import is_contribute_key
-
-    if is_contribute_key(key):
+    if args.key and is_contribute_key(args.key):
         sys.exit("That is a contribute-only key; the main computer needs the full mesh key.")
+    if args.key and (len(args.key) < 8 or not all(ch.isalnum() or ch in "-_" for ch in args.key)):
+        sys.exit("Pick a key of at least 8 letters, digits, - or _ (anyone with it can use your mesh).")
+    key = _mesh_key(args.key, save=True)
     token = args.hf_token or os.environ.get("HF_TOKEN")
     try:
         source = await _load_source(args.model, token)
@@ -255,6 +266,28 @@ async def cmd_host(args) -> None:
         if tunnel:
             tunnel.kill()
         await hub.close()
+
+
+async def cmd_links(args) -> None:
+    """Print this computer's join links, for when the host window is closed or scrolled away."""
+    import hashlib
+
+    from .crypto import contribute_key
+
+    key = _mesh_key(args.key)
+    mine = hashlib.sha256(key.encode()).hexdigest()[:12]
+    port = None
+    for p in range(8000, 8030):
+        hello = await _edgemesh_on(p)
+        if hello and hello.get("mesh") == mine:
+            port = p
+            break
+    origin = f"http://{_lan_ip()}:{port or 8000}"
+    print(f"Mesh key: {key}   (stored in {HOME / 'mesh.key'})")
+    print(f"  Full link (chat, settings, join):  {origin}/?k={key}")
+    print(f"  Contribute-only link:              {origin}/contribute?c={contribute_key(key)}")
+    if port is None:
+        print("  (EdgeMesh isn't hosting on this computer right now; the port is 8000 unless it was busy.)")
 
 
 def _print_qr(text: str) -> None:
@@ -381,7 +414,10 @@ def _interactive() -> list[str]:
     print(f"EdgeMesh {__version__}: run AI models across your devices.\n")
     print("  1) Host a mesh on this computer (others join it)")
     print("  2) Join an existing mesh as a worker")
-    choice = input("\nChoose 1 or 2: ").strip()
+    print("  3) Show this computer's mesh key and join links")
+    choice = input("\nChoose 1, 2 or 3: ").strip()
+    if choice == "3":
+        return ["links"]
     if choice == "2":
         return ["join", input("Paste the join link: ").strip()]
     public = input("Let devices on other networks join too (school, cellular)? [y/N]: ").strip().lower()
@@ -403,7 +439,8 @@ def main(argv: list[str] | None = None) -> None:
     h.add_argument("--hf-token", help="Hugging Face token for gated/private models (or set HF_TOKEN)")
     h.add_argument("--port", type=int, default=8000)
     h.add_argument("--bind", default="0.0.0.0")
-    h.add_argument("--key", help="mesh key (default: generated once, stored in ~/.edgemesh)")
+    h.add_argument("--key", help="set your own mesh key; it is saved and used from then on "
+                   "(default: one generated once and kept in ~/.edgemesh/mesh.key)")
     h.add_argument("--no-worker", action="store_true", help="don't run layers on the hub machine itself")
     h.add_argument("--public", action="store_true",
                    help="also open a free Cloudflare https tunnel so devices on any network can join")
@@ -442,6 +479,9 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("url")
     s.add_argument("--key")
 
+    lk = sub.add_parser("links", help="show this computer's mesh key and join links")
+    lk.add_argument("--key", help=argparse.SUPPRESS)
+
     m = sub.add_parser("make-model", help="write a random test model")
     m.add_argument("out")
     m.add_argument("--layers", type=int, default=8)
@@ -458,7 +498,8 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(name)s %(message)s")
     fn = {"host": cmd_host, "join": cmd_join, "contribute": cmd_contribute, "run": cmd_run, "status": cmd_status,
-          "make-model": cmd_make_model, "pull": cmd_pull}[args.cmd]
+          "make-model": cmd_make_model, "pull": cmd_pull,
+          "links": cmd_links}[args.cmd]
     try:
         if asyncio.iscoroutinefunction(fn):
             asyncio.run(fn(args))

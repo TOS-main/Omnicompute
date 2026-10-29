@@ -23,7 +23,7 @@ import logging
 import os
 import socket
 import time
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import aiohttp
 from cryptography.exceptions import InvalidTag
@@ -185,9 +185,10 @@ class _UDP(asyncio.DatagramProtocol):
 def parse_join_url(url: str) -> tuple[str, str]:
     """'http://1.2.3.4:8000/?k=SECRET' -> ('http://1.2.3.4:8000', 'SECRET').
     A contribute-only link ('.../contribute?c=KEY') gives its contribute key instead."""
+    url = url.strip().strip("\"'<>()[] .,;")  # copied with quotes or sentence punctuation
     parts = urlsplit(url if "://" in url else "http://" + url)
     q = dict(q.split("=", 1) for q in parts.query.split("&") if "=" in q)
-    return f"{parts.scheme}://{parts.netloc}", q.get("k") or q.get("c", "")
+    return f"{parts.scheme}://{parts.netloc}", unquote(q.get("k") or q.get("c", "")).strip()
 
 
 class MeshNode(Messenger):

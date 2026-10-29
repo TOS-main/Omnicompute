@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "edgemesh"
-version = "0.3.1"
+version = "0.3.2"
 description = "Split AI model inference across phones and computers on any network"
 readme = "README.md"
 requires-python = ">=3.9"

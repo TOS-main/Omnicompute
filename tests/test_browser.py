@@ -125,3 +125,29 @@ async def test_contribute_page_with_webgpu(model_file):
             for n in nodes:
                 await n.close()
             await hub.close()
+
+
+async def test_wrong_saved_key_asks_again(model_file):
+    path, cfg, w = model_file
+    hub, nodes = await start_mesh(path, [])
+    base = f"http://127.0.0.1:{hub.port}"
+    async with playwright.async_playwright() as p:
+        try:
+            browser = await p.chromium.launch()
+        except Exception:
+            browser = await p.chromium.launch(executable_path="/opt/pw-browsers/chromium", args=["--no-sandbox"])
+        try:
+            page = await browser.new_page()
+            await page.goto(f"{base}/?k=an-old-meshes-key")
+            await page.wait_for_function("!document.getElementById('keyerr').hidden", timeout=5000)
+            await page.goto(base + "/")  # the bad key was forgotten, not kept
+            await page.wait_for_function("!document.getElementById('keybox').hidden", timeout=5000)
+            assert await page.is_hidden("#keyerr")
+            await page.fill("#keyinput", f'"{base}/?k={KEY}"')  # a whole link, pasted with quotes
+            await page.press("#keyinput", "Enter")
+            await page.wait_for_function("document.getElementById('pill').className.includes('ok')", timeout=5000)
+        finally:
+            await browser.close()
+            for x in nodes:
+                await x.close()
+            await hub.close()

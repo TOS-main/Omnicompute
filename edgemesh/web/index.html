@@ -28,7 +28,8 @@
   <section id="keybox" class="page" hidden>
     <div class="card narrow">
       <h2>Enter the mesh key</h2>
-      <p class="muted">Open the join link from the main computer, or paste its key.</p>
+      <p id="keyerr" class="bad-text" hidden>That key doesn't match this main computer. It may be from an older mesh, or the link was cut off when copied.</p>
+      <p class="muted">Paste the link from the main computer's window (the one with <code>?k=</code>), or just its key. On the main computer, <code>edgemesh links</code> prints them again.</p>
       <form id="keyform" class="row"><input id="keyinput" placeholder="mesh key" autocomplete="off"><button class="primary">Continue</button></form>
     </div>
   </section>

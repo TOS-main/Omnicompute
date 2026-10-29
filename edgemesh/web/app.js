@@ -39,9 +39,10 @@ async function refreshStatus() {
     const r = await api("/api/status");
     state.status = await r.json();
   } catch (e) {
-    $("pill").textContent = e.message === "wrong mesh key" ? "wrong mesh key" : "main computer unreachable";
+    if (e.message === "wrong mesh key") { askForKey(true); return false; }
+    $("pill").textContent = "main computer unreachable";
     $("pill").className = "pill bad";
-    return;
+    return true;
   }
   const s = state.status, n = s.devices.filter((d) => d.role === "worker").length;
   $("pill").className = "pill ok";
@@ -55,6 +56,7 @@ async function refreshStatus() {
   else setJoin(location.origin);
   if (s.chat_version !== state.chatVersion && !state.generating) loadChat();
   drawCapacity(s.capacity);
+  return true;
 }
 
 // ================================================================ devices page
@@ -636,10 +638,34 @@ document.addEventListener("click", async (e) => {
 
 // ================================================================ start
 
-$("keyform").onsubmit = (e) => { e.preventDefault(); key = $("keyinput").value.trim(); init(); };
+// A key that doesn't match (an old mesh's key saved in this browser, or a mistyped one):
+// forget it and ask again, instead of showing "wrong mesh key" forever.
+function askForKey(wrong) {
+  clearInterval(state.poll);
+  store.set("key", null);
+  $("pill").textContent = wrong ? "wrong mesh key" : "no mesh key";
+  $("pill").className = "pill bad";
+  $("keyerr").hidden = !wrong;
+  for (const p of document.querySelectorAll(".page")) p.classList.remove("active");
+  $("keybox").hidden = false;
+  $("keybox").classList.add("active");
+}
+
+$("keyform").onsubmit = (e) => {
+  e.preventDefault();
+  let v = $("keyinput").value.trim().replace(/^["'<]+|["'>.,;)]+$/g, "");
+  try { // a whole link pasted: take its key
+    const u = new URL(v.includes("://") ? v : "http://" + v);
+    if (u.searchParams.get("c") && !u.searchParams.get("k")) { location.href = `/contribute?c=${encodeURIComponent(u.searchParams.get("c"))}`; return; }
+    if (u.searchParams.get("k")) v = u.searchParams.get("k");
+  } catch { /* just a key */ }
+  if (/^c[0-9a-f]{24}$/.test(v)) { location.href = `/contribute?c=${v}`; return; } // contribute-only key
+  key = v;
+  init();
+};
 
 async function init() {
-  if (!key) { $("keybox").hidden = false; $("keybox").classList.add("active"); return; }
+  if (!key) { askForKey(false); return; }
   $("keybox").hidden = true;
   $("keybox").classList.remove("active");
   store.set("key", key);
@@ -649,8 +675,9 @@ async function init() {
   renderChat();
   updateCtxMeter();
   showTab(store.get("tab", "chat"));
-  await refreshStatus();
-  setInterval(refreshStatus, 2500);
+  if (!(await refreshStatus())) return;
+  clearInterval(state.poll);
+  state.poll = setInterval(refreshStatus, 2500);
   refreshModelInfo();
   refreshDownloaded();
   loadChat();

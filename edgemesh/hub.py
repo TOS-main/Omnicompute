@@ -232,6 +232,7 @@ class Hub:
                 await ws.send_bytes(pack({"type": "error", "error": "removed from this mesh by the main computer"}))
                 return ws
             if not node_id or node_id == HUB_ID or not ok:
+                log.warning("%s (%s) tried to join with a key that isn't this mesh's", node_id or "a device", request.remote)
                 await ws.send_bytes(pack({"type": "error", "error": "wrong mesh key"}))
                 return ws
             old = self.clients.get(node_id)

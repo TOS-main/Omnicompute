@@ -55,6 +55,15 @@ main computer, so every controller sees the same chat and answers stream onto al
 Each answer shows which devices computed it and how much of the work each did. From a terminal:
 `edgemesh run "<link>" "Once upon a time" --max-new 50`.
 
+### The mesh key
+
+The main computer makes its mesh key once and keeps it in `~/.edgemesh/mesh.key`
+(`%USERPROFILE%\.edgemesh\mesh.key` on Windows), so links and installed devices keep working
+after restarts and updates. To pick your own, run `edgemesh host --key my-own-key` once; it is
+saved and used from then on. `edgemesh links` (option 3 in the menu) prints the key and both
+links again. If a device says "wrong mesh key", its link is from another mesh or for another
+port: copy it again from `edgemesh links`.
+
 ## Devices on other networks (school, cellular)
 
 `edgemesh host --public` opens a free Cloudflare quick tunnel and prints an `https://….trycloudflare.com`

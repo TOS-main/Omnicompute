@@ -183,3 +183,4 @@ button.primary.stop { background: var(--bad); border-color: var(--bad); }
 .limitbox .row > input[type=number] { flex: 0 0 72px; }
 details.more { margin: 6px 0; }
 details.more > summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
+.bad-text { color: var(--bad, #e5484d); }
