@@ -74,7 +74,7 @@ const CREATOR_CODE = "cfb109c420aa15d6f1ad769a9";
 
 // owner.github.io/repo -> owner/repo, so a fork's page points at the fork
 const owner = location.hostname.endsWith(".github.io") ? location.hostname.split(".")[0] : "TOS-main";
-const repoName = location.hostname.endsWith(".github.io") ? (location.pathname.split("/")[1] || "omnicompute") : "omnicompute";
+const repoName = location.hostname.endsWith(".github.io") ? (location.pathname.split("/")[1] || "Omnicompute") : "Omnicompute";
 const REPO = `${owner}/${repoName}`;
 const RAW = `https://raw.githubusercontent.com/${REPO}/main/omnicompute/installers`;
 const ps = (env) => `${env}irm ${RAW}/install.ps1 | iex`;

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Omnicompute one-line installer for macOS and Linux. Works from any network:
-#   curl -fsSL https://raw.githubusercontent.com/TOS-main/omnicompute/main/omnicompute/installers/install.sh | OMNICOMPUTE_CODE=CODE sh
+#   curl -fsSL https://raw.githubusercontent.com/TOS-main/Omnicompute/main/omnicompute/installers/install.sh | OMNICOMPUTE_CODE=CODE sh
 # (CODE = the contribute code or permanent link the main device shows), or served by the main device:
 #   curl -fsSL "@ORIGIN@/install.sh?c=@KEY@" | sh
 # Without a code it asks: join my mesh, start my own mesh here (OMNICOMPUTE_HOST=1), or help the
@@ -13,7 +13,7 @@ set -e
 HUB="@ORIGIN@"
 KEY="@KEY@"
 DIR="$HOME/.omnicompute"
-REPO="${OMNICOMPUTE_REPO:-TOS-main/omnicompute}"
+REPO="${OMNICOMPUTE_REPO:-TOS-main/Omnicompute}"
 case "$HUB" in
   @*)  # run straight from GitHub: the code finds the main device wherever it is
     HUB=""

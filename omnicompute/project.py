@@ -4,7 +4,7 @@ link is a page on its GitHub Pages site. Forks change these two lines (or set th
 import os
 from pathlib import Path
 
-REPO = os.environ.get("OMNICOMPUTE_REPO", "TOS-main/omnicompute")
+REPO = os.environ.get("OMNICOMPUTE_REPO", "TOS-main/Omnicompute")
 PAGES = os.environ.get("OMNICOMPUTE_PAGES", f"https://{REPO.split('/')[0].lower()}.github.io/{REPO.split('/')[1]}")
 # The project creator's own mesh, which anyone may help with spare compute: installers offer it
 # when no code is given, and `omnicompute contribute creator` joins it. Forks put their own here.

@@ -19,20 +19,20 @@ and activations hop from device to device for every token.
 
 ## Quick start (no setup, any network)
 
-The project page, https://tos-main.github.io/omnicompute/, has every command below with copy buttons.
+The project page, https://tos-main.github.io/Omnicompute/, has every command below with copy buttons.
 
 **Start your own mesh** on the device that stays on (a phone works well):
 
-* Android: install the app from [the latest release](https://github.com/TOS-main/omnicompute/releases/latest/download/omnicompute.apk). It hosts in the background, starts again after a restart, and has a Stop button in its notification. No Termux needed.
-* Windows (PowerShell): `$env:OMNICOMPUTE_HOST="1"; irm https://raw.githubusercontent.com/TOS-main/omnicompute/main/omnicompute/installers/install.ps1 | iex`
-* Mac / Linux: `curl -fsSL https://raw.githubusercontent.com/TOS-main/omnicompute/main/omnicompute/installers/install.sh | OMNICOMPUTE_HOST=1 sh`
+* Android: install the app from [the latest release](https://github.com/TOS-main/Omnicompute/releases/latest/download/omnicompute.apk). It hosts in the background, starts again after a restart, and has a Stop button in its notification. No Termux needed.
+* Windows (PowerShell): `$env:OMNICOMPUTE_HOST="1"; irm https://raw.githubusercontent.com/TOS-main/Omnicompute/main/omnicompute/installers/install.ps1 | iex`
+* Mac / Linux: `curl -fsSL https://raw.githubusercontent.com/TOS-main/Omnicompute/main/omnicompute/installers/install.sh | OMNICOMPUTE_HOST=1 sh`
 
-The main device prints a **permanent link** (`https://tos-main.github.io/omnicompute/go.html#c=CODE`). It always finds the main device, even after its Cloudflare address or Wi-Fi address changes. Each mesh gets its own random Cloudflare address, with no account needed.
+The main device prints a **permanent link** (`https://tos-main.github.io/Omnicompute/go.html#c=CODE`). It always finds the main device, even after its Cloudflare address or Wi-Fi address changes. Each mesh gets its own random Cloudflare address, with no account needed.
 
 **Add your other devices** from any network: open the permanent link in a browser, or install with the code:
 
-* Windows: `$env:OMNICOMPUTE_CODE="CODE"; irm https://raw.githubusercontent.com/TOS-main/omnicompute/main/omnicompute/installers/install.ps1 | iex`
-* Mac / Linux: `curl -fsSL https://raw.githubusercontent.com/TOS-main/omnicompute/main/omnicompute/installers/install.sh | OMNICOMPUTE_CODE=CODE sh`
+* Windows: `$env:OMNICOMPUTE_CODE="CODE"; irm https://raw.githubusercontent.com/TOS-main/Omnicompute/main/omnicompute/installers/install.ps1 | iex`
+* Mac / Linux: `curl -fsSL https://raw.githubusercontent.com/TOS-main/Omnicompute/main/omnicompute/installers/install.sh | OMNICOMPUTE_CODE=CODE sh`
 
 The installer asks how many cores to use, and whether to keep the computer awake while it helps. Change these later with `omnicompute limits --use both --cpu 50 --gpu 80 --cores 4 --awake on`. That command works on a running contributor, and the CPU and GPU each have their own limit.
 

@@ -1,5 +1,5 @@
 # Omnicompute one-line installer for Windows. Works from any network:
-#   $env:OMNICOMPUTE_CODE="CODE"; irm https://raw.githubusercontent.com/TOS-main/omnicompute/main/omnicompute/installers/install.ps1 | iex
+#   $env:OMNICOMPUTE_CODE="CODE"; irm https://raw.githubusercontent.com/TOS-main/Omnicompute/main/omnicompute/installers/install.ps1 | iex
 # (CODE = the contribute code or permanent link the main device shows), or served by the main device:
 #   irm "@ORIGIN@/install.ps1?c=@KEY@" | iex
 # Without a code it asks: join my mesh, start my own mesh here ($env:OMNICOMPUTE_HOST="1"), or help
@@ -16,7 +16,7 @@ $ProgressPreference = "SilentlyContinue"
 $Hub = "@ORIGIN@"
 $Key = "@KEY@"
 $Dir = Join-Path $env:LOCALAPPDATA "Omnicompute"
-$Repo = if ($env:OMNICOMPUTE_REPO) { $env:OMNICOMPUTE_REPO } else { "TOS-main/omnicompute" }
+$Repo = if ($env:OMNICOMPUTE_REPO) { $env:OMNICOMPUTE_REPO } else { "TOS-main/Omnicompute" }
 if ($Hub.StartsWith("@")) {  # run straight from GitHub: the code finds the main device wherever it is
   $Hub = ""
   $Code = $env:OMNICOMPUTE_CODE

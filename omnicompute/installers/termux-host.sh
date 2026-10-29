@@ -1,9 +1,9 @@
 #!/data/data/com.termux/files/usr/bin/sh
 # Omnicompute on an Android phone, in Termux (install Termux from F-Droid or GitHub, not the old
 # Play Store version). No computer needed; paste into Termux:
-#   curl -fsSL https://raw.githubusercontent.com/TOS-main/omnicompute/main/omnicompute/installers/termux-host.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/TOS-main/Omnicompute/main/omnicompute/installers/termux-host.sh | sh
 #       host: this phone becomes the main device of a new mesh (OMNICOMPUTE_KEY=KEY keeps an old mesh key)
-#   curl -fsSL https://raw.githubusercontent.com/TOS-main/omnicompute/main/omnicompute/installers/termux-host.sh | OMNICOMPUTE_CODE=CODE sh
+#   curl -fsSL https://raw.githubusercontent.com/TOS-main/Omnicompute/main/omnicompute/installers/termux-host.sh | OMNICOMPUTE_CODE=CODE sh
 #       contribute: this phone computes for the mesh whose contribute code or link this is
 # A main device serves the same script with its key filled in: curl -fsSL "@ORIGIN@/termux.sh?k=@KEY@" | sh
 # Hosting keeps the same mesh key, so your links only change address. A host can also compute
@@ -16,7 +16,7 @@ MODE="@MODE@"
 case "$HUB" in @*) HUB="" ;; esac
 case "$KEY" in @*) KEY="${OMNICOMPUTE_KEY:-}" ;; esac
 case "$MODE" in @*) MODE="host" ;; esac
-REPO="${OMNICOMPUTE_REPO:-TOS-main/omnicompute}"
+REPO="${OMNICOMPUTE_REPO:-TOS-main/Omnicompute}"
 JOIN=""
 if [ -n "${OMNICOMPUTE_CODE:-}" ]; then MODE="contribute"; JOIN="$OMNICOMPUTE_CODE"
 elif [ "$MODE" = "contribute" ]; then JOIN="$HUB/contribute?c=$KEY"; fi
