@@ -30,9 +30,9 @@ android {
             // key in this folder, so every build of the open-source app installs over the last.
             val own = System.getenv("OMNICOMPUTE_KEYSTORE")
             storeFile = if (own != null) file(own) else rootProject.file("shared-release.keystore")
-            storePassword = System.getenv("OMNICOMPUTE_KEYSTORE_PASSWORD") ?: "omnicompute"
-            keyAlias = System.getenv("OMNICOMPUTE_KEY_ALIAS") ?: "omnicompute"
-            keyPassword = System.getenv("OMNICOMPUTE_KEY_PASSWORD") ?: "omnicompute"
+            storePassword = System.getenv("OMNICOMPUTE_KEYSTORE_PASSWORD") ?: "edgemesh"  // the shared keystore was made under the old name
+            keyAlias = System.getenv("OMNICOMPUTE_KEY_ALIAS") ?: "edgemesh"  // the shared keystore was made under the old name
+            keyPassword = System.getenv("OMNICOMPUTE_KEY_PASSWORD") ?: "edgemesh"  // the shared keystore was made under the old name
         }
     }
 

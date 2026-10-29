@@ -292,7 +292,7 @@ def test_package_zip_installs_with_pip(tmp_path):
 
 
 async def test_background_contributor_starts_and_stops(model_file, tmp_path, monkeypatch):
-    if sys.platform == "win32":
+    if not sys.platform.startswith("linux"):
         pytest.skip("uses the Linux autostart path")
     path, cfg, w = model_file
     hub, nodes = await start_mesh(path, [])
@@ -326,7 +326,7 @@ async def test_background_contributor_starts_and_stops(model_file, tmp_path, mon
 
 async def test_remove_device_uninstalls_it(model_file, tmp_path):
     """"Remove" on the main computer: the installer-made setup deletes itself and stays gone."""
-    if sys.platform == "win32":
+    if not sys.platform.startswith("linux"):
         pytest.skip("uses the Linux autostart path")
     path, cfg, w = model_file
     hub, nodes = await start_mesh(path, [])
