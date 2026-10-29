@@ -16,17 +16,17 @@ import aiohttp
 import numpy as np
 import pytest
 
-from edgemesh import limits as L
-from edgemesh.crypto import contribute_key, is_contribute_key
-from edgemesh.limits import LimitStore
-from edgemesh.model import Shard, random_model
-from edgemesh.node import MeshNode, parse_join_url
-from edgemesh.worker import Worker
+from omnicompute import limits as L
+from omnicompute.crypto import contribute_key, is_contribute_key
+from omnicompute.limits import LimitStore
+from omnicompute.model import Shard, random_model
+from omnicompute.node import MeshNode, parse_join_url
+from omnicompute.worker import Worker
 from test_mesh import KEY, collect, model_file, reference, start_mesh  # noqa: F401
 
 
 def _gpu(bits=16):
-    from edgemesh.gpu import GPU, open_gpu
+    from omnicompute.gpu import GPU, open_gpu
 
     gpu = open_gpu(allow_software=True)
     if isinstance(gpu, GPU):
@@ -125,9 +125,9 @@ def test_8bit_gpu_weights_stay_close_to_the_model():
 def test_cuda_backend_through_torch(monkeypatch):
     """The CUDA code path, run by CPU torch (there is no NVIDIA card here)."""
     pytest.importorskip("torch")
-    from edgemesh.gpu import CudaGPU, open_gpu
+    from omnicompute.gpu import CudaGPU, open_gpu
 
-    monkeypatch.setenv("EDGEMESH_GPU", "torch-cpu")
+    monkeypatch.setenv("OMNICOMPUTE_GPU", "torch-cpu")
     gpu = open_gpu()
     assert isinstance(gpu, CudaGPU)
     for kw in [dict(arch="gpt2"), dict(arch="llama", n_kv_head=2, qkv_bias=True, tie=True)]:
@@ -146,8 +146,8 @@ async def test_mesh_with_a_gpu_worker(model_file, monkeypatch):
     gpu = _gpu()
     if gpu is None:
         pytest.skip("no WebGPU adapter")
-    monkeypatch.setenv("EDGEMESH_GPU", "force")
-    monkeypatch.setenv("EDGEMESH_WEIGHTS", "16")
+    monkeypatch.setenv("OMNICOMPUTE_GPU", "force")
+    monkeypatch.setenv("OMNICOMPUTE_WEIGHTS", "16")
     path, cfg, w = model_file
     hub, nodes = await start_mesh(path, [("cpu-box", False, 2)])
     n = MeshNode("gpu-box", KEY, f"http://127.0.0.1:{hub.port}",
@@ -169,12 +169,12 @@ async def test_mesh_with_a_gpu_worker(model_file, monkeypatch):
 
 
 async def test_a_gpu_that_computes_wrong_falls_back_to_the_cpu(model_file, monkeypatch):
-    from edgemesh import gpu as G
+    from omnicompute import gpu as G
 
     gpu = _gpu()
     if gpu is None:
         pytest.skip("no WebGPU adapter")
-    monkeypatch.setenv("EDGEMESH_GPU", "force")
+    monkeypatch.setenv("OMNICOMPUTE_GPU", "force")
 
     def bad_put(self, name, w):
         raise G.GPUMismatch(f"{name}: off by 1e3")
@@ -266,12 +266,12 @@ async def test_shared_chat_models_capacity_and_installers(model_file, tmp_path):
                 assert f'$Key = "{ck}"' in await r.text()
             async with s.get(base + "/install.sh?c=wrong") as r:
                 assert r.status == 401
-            async with s.get(base + "/download/edgemesh.zip?c=" + ck) as r:
+            async with s.get(base + "/download/omnicompute.zip?c=" + ck) as r:
                 z = zipfile.ZipFile(io.BytesIO(await r.read()))
             names = z.namelist()
-            assert "edgemesh-src/pyproject.toml" in names and "edgemesh-src/edgemesh/cli.py" in names
-            assert "edgemesh-src/edgemesh/web/contribute.html" in names
-            assert "edgemesh-src/edgemesh/installers/install.sh" in names
+            assert "omnicompute-src/pyproject.toml" in names and "omnicompute-src/omnicompute/cli.py" in names
+            assert "omnicompute-src/omnicompute/web/contribute.html" in names
+            assert "omnicompute-src/omnicompute/installers/install.sh" in names
             async with s.get(base + "/contribute") as r:
                 assert "Lend this device" in await r.text()
     finally:
@@ -281,14 +281,14 @@ async def test_shared_chat_models_capacity_and_installers(model_file, tmp_path):
 
 
 def test_package_zip_installs_with_pip(tmp_path):
-    from edgemesh.hub import _package_zip
+    from omnicompute.hub import _package_zip
 
     zipfile.ZipFile(io.BytesIO(_package_zip())).extractall(tmp_path)
     target = tmp_path / "site"
     subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-deps", "--no-build-isolation",
-                    "--target", str(target), str(tmp_path / "edgemesh-src")], check=True)
-    assert (target / "edgemesh" / "web" / "worker.js").exists()
-    assert (target / "edgemesh" / "installers" / "install.ps1").exists()
+                    "--target", str(target), str(tmp_path / "omnicompute-src")], check=True)
+    assert (target / "omnicompute" / "web" / "worker.js").exists()
+    assert (target / "omnicompute" / "installers" / "install.ps1").exists()
 
 
 async def test_background_contributor_starts_and_stops(model_file, tmp_path, monkeypatch):
@@ -297,11 +297,11 @@ async def test_background_contributor_starts_and_stops(model_file, tmp_path, mon
     path, cfg, w = model_file
     hub, nodes = await start_mesh(path, [])
     home, cfgdir = tmp_path / "home", tmp_path / "config"
-    env = {**os.environ, "EDGEMESH_HOME": str(home), "XDG_CONFIG_HOME": str(cfgdir), "EDGEMESH_SCORE": "1",
-           "EDGEMESH_GPU": "0", "PYTHONPATH": str(Path(__file__).parent.parent)}
+    env = {**os.environ, "OMNICOMPUTE_HOME": str(home), "XDG_CONFIG_HOME": str(cfgdir), "OMNICOMPUTE_SCORE": "1",
+           "OMNICOMPUTE_GPU": "0", "PYTHONPATH": str(Path(__file__).parent.parent)}
     link = f"http://127.0.0.1:{hub.port}/contribute?c={hub.contribute_key}"
     try:
-        out = subprocess.run([sys.executable, "-m", "edgemesh", "contribute", link, "--name", "bg-box"],
+        out = subprocess.run([sys.executable, "-m", "omnicompute", "contribute", link, "--name", "bg-box"],
                              env=env, capture_output=True, text=True, timeout=30).stdout
         assert "in the background as 'bg-box'" in out
         for _ in range(400):  # a cold Python start plus imports can take a while on a busy machine
@@ -309,14 +309,14 @@ async def test_background_contributor_starts_and_stops(model_file, tmp_path, mon
                 break
             await asyncio.sleep(0.1)
         assert hub.clients["bg-box"].contributor
-        desktop = (cfgdir / "autostart" / "edgemesh.desktop").read_text(encoding="utf-8")
+        desktop = (cfgdir / "autostart" / "omnicompute.desktop").read_text(encoding="utf-8")
         assert "NoDisplay=true" in desktop and (home / "contribute.sh").exists()
-        subprocess.run([sys.executable, "-m", "edgemesh", "contribute", "--stop"], env=env, check=True, timeout=30)
+        subprocess.run([sys.executable, "-m", "omnicompute", "contribute", "--stop"], env=env, check=True, timeout=30)
         for _ in range(300):
             if "bg-box" not in hub.clients:
                 break
             await asyncio.sleep(0.1)
-        assert "bg-box" not in hub.clients and not (cfgdir / "autostart" / "edgemesh.desktop").exists()
+        assert "bg-box" not in hub.clients and not (cfgdir / "autostart" / "omnicompute.desktop").exists()
         assert "joined" in (home / "contribute.log").read_text(encoding="utf-8")
     finally:
         for n in nodes:
@@ -334,17 +334,17 @@ async def test_remove_device_uninstalls_it(model_file, tmp_path):
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", "--system-site-packages", str(install / "venv")], check=True)
     (install / "installed-by-edgemesh-installer").write_text("x")
     home, cfgdir = tmp_path / "home", tmp_path / "config"
-    env = {**os.environ, "EDGEMESH_HOME": str(home), "XDG_CONFIG_HOME": str(cfgdir), "EDGEMESH_SCORE": "1",
-           "EDGEMESH_GPU": "0", "PYTHONPATH": str(Path(__file__).parent.parent)}
+    env = {**os.environ, "OMNICOMPUTE_HOME": str(home), "XDG_CONFIG_HOME": str(cfgdir), "OMNICOMPUTE_SCORE": "1",
+           "OMNICOMPUTE_GPU": "0", "PYTHONPATH": str(Path(__file__).parent.parent)}
     link = f"http://127.0.0.1:{hub.port}/contribute?c={hub.contribute_key}"
     try:
-        subprocess.run([str(install / "venv" / "bin" / "python"), "-m", "edgemesh", "contribute", link, "--name", "lab-pc"],
+        subprocess.run([str(install / "venv" / "bin" / "python"), "-m", "omnicompute", "contribute", link, "--name", "lab-pc"],
                        env=env, check=True, capture_output=True, timeout=30)
         for _ in range(400):
             if "lab-pc" in hub.clients:
                 break
             await asyncio.sleep(0.1)
-        assert (cfgdir / "autostart" / "edgemesh.desktop").exists()
+        assert (cfgdir / "autostart" / "omnicompute.desktop").exists()
         async with aiohttp.ClientSession() as s:
             async with s.post(f"http://127.0.0.1:{hub.port}/api/devices/lab-pc/remove", headers={"X-Mesh-Key": KEY}) as r:
                 res = await r.json()
@@ -354,7 +354,7 @@ async def test_remove_device_uninstalls_it(model_file, tmp_path):
                 break
             await asyncio.sleep(0.1)
         assert not install.exists() and not home.exists()  # uninstalled
-        assert not (cfgdir / "autostart" / "edgemesh.desktop").exists()  # won't start with the computer
+        assert not (cfgdir / "autostart" / "omnicompute.desktop").exists()  # won't start with the computer
         assert "lab-pc" not in hub.clients
         again = MeshNode("lab-pc", hub.contribute_key, f"http://127.0.0.1:{hub.port}", {"role": "worker"})
         with pytest.raises(PermissionError, match="removed"):
@@ -368,8 +368,8 @@ async def test_remove_device_uninstalls_it(model_file, tmp_path):
 async def test_host_moves_to_a_free_port_or_reuses_a_running_hub(model_file, monkeypatch):
     import socket
 
-    from edgemesh.cli import _start_on_free_port
-    from edgemesh.hub import Hub
+    from omnicompute.cli import _start_on_free_port
+    from omnicompute.hub import Hub
 
     path, cfg, w = model_file
     busy = socket.socket()
@@ -398,7 +398,7 @@ def test_join_links_survive_copy_paste():
 
 
 def test_mesh_key_is_kept_and_can_be_set(tmp_path, monkeypatch, capsys):
-    from edgemesh import cli
+    from omnicompute import cli
 
     monkeypatch.setattr(cli, "HOME", tmp_path)
     first = cli._mesh_key(None)
@@ -407,7 +407,7 @@ def test_mesh_key_is_kept_and_can_be_set(tmp_path, monkeypatch, capsys):
     assert cli._mesh_key(None) == "my-own-key-1"  # yours from then on
     asyncio.run(cli.cmd_links(argparse.Namespace(key=None)))
     out = capsys.readouterr().out
-    assert "?k=my-own-key-1" in out and "contribute?c=c" in out and 'EDGEMESH_CODE="c' in out and "go.html#c=c" in out
+    assert "?k=my-own-key-1" in out and "contribute?c=c" in out and 'OMNICOMPUTE_CODE="c' in out and "go.html#c=c" in out
 
 
 async def test_termux_host_script_needs_the_full_key(model_file):
@@ -436,17 +436,17 @@ def test_permanent_link_pieces_and_github_installers():
     """The beacon script is the same on the web page and the GitHub Pages permanent link, and the
     installers run straight from GitHub with just a code (no main device on the same network)."""
     root = Path(__file__).resolve().parent.parent
-    assert (root / "docs" / "beacon.js").read_text(encoding="utf-8") == (root / "edgemesh" / "web" / "beacon.js").read_text(encoding="utf-8")
+    assert (root / "docs" / "beacon.js").read_text(encoding="utf-8") == (root / "omnicompute" / "web" / "beacon.js").read_text(encoding="utf-8")
     for name in ("install.sh", "termux-host.sh"):
-        text = (root / "edgemesh" / "installers" / name).read_text(encoding="utf-8")
-        assert "EDGEMESH_CODE" in text and "archive/refs/heads/main.zip" in text
-    ps = (root / "edgemesh" / "installers" / "install.ps1").read_text(encoding="utf-8")
-    assert "EDGEMESH_CODE" in ps and "archive/refs/heads/main.zip" in ps and "--cores" in ps
-    assert "--cores" in (root / "edgemesh" / "installers" / "install.sh").read_text(encoding="utf-8")
+        text = (root / "omnicompute" / "installers" / name).read_text(encoding="utf-8")
+        assert "OMNICOMPUTE_CODE" in text and "archive/refs/heads/main.zip" in text
+    ps = (root / "omnicompute" / "installers" / "install.ps1").read_text(encoding="utf-8")
+    assert "OMNICOMPUTE_CODE" in ps and "archive/refs/heads/main.zip" in ps and "--cores" in ps
+    assert "--cores" in (root / "omnicompute" / "installers" / "install.sh").read_text(encoding="utf-8")
 
 
 def test_cores_flag_is_saved_and_scales_the_score(tmp_path):
-    from edgemesh import limits as L
+    from omnicompute import limits as L
 
     store = L.LimitStore(tmp_path / "l.json", {"cores": 4})
     assert store.limits["cores"] == 4
@@ -462,11 +462,11 @@ def test_install_sh_from_github_downloads_the_repo(tmp_path):
     bin_.mkdir()
     (bin_ / "curl").write_text(f'#!/bin/sh\necho "$@" > "{tmp_path}/curl-args"\nexit 1\n')
     (bin_ / "curl").chmod(0o755)
-    script = Path(__file__).resolve().parent.parent / "edgemesh" / "installers" / "install.sh"
-    env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "HOME": str(tmp_path), "EDGEMESH_YES": "1",
-           "EDGEMESH_CODE": "c" + "ab" * 12, "EDGEMESH_REPO": "someone/fork"}
+    script = Path(__file__).resolve().parent.parent / "omnicompute" / "installers" / "install.sh"
+    env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "HOME": str(tmp_path), "OMNICOMPUTE_YES": "1",
+           "OMNICOMPUTE_CODE": "c" + "ab" * 12, "OMNICOMPUTE_REPO": "someone/fork"}
     out = subprocess.run(["sh", str(script)], env=env, capture_output=True, text=True, timeout=60)
-    assert "Downloading EdgeMesh from GitHub (someone/fork)" in out.stdout
+    assert "Downloading Omnicompute from GitHub (someone/fork)" in out.stdout
     assert "https://github.com/someone/fork/archive/refs/heads/main.zip" in (tmp_path / "curl-args").read_text(encoding="utf-8")
 
 
@@ -477,28 +477,28 @@ def test_android_entry_point_hosts_and_stops(tmp_path, monkeypatch):
     import time
     import urllib.request
 
-    from edgemesh import android
+    from omnicompute import android
 
-    monkeypatch.setenv("EDGEMESH_BEACON", "off")
+    monkeypatch.setenv("OMNICOMPUTE_BEACON", "off")
     monkeypatch.setattr(_sys, "stdout", _sys.stdout)
     monkeypatch.setattr(_sys, "stderr", _sys.stderr)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    import edgemesh.cli as cli
+    import omnicompute.cli as cli
 
-    monkeypatch.setattr(cli, "HOME", tmp_path / ".edgemesh")
+    monkeypatch.setattr(cli, "HOME", tmp_path / ".omnicompute")
     android.start(str(tmp_path), port=port, public=False)
     try:
         for _ in range(100):
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/hello", timeout=1) as r:
-                    assert json.load(r)["edgemesh"]
+                    assert json.load(r)["omnicompute"]
                 break
             except OSError:
                 time.sleep(0.1)
         else:
-            raise AssertionError((tmp_path / ".edgemesh" / "host.log").read_text(encoding="utf-8"))
+            raise AssertionError((tmp_path / ".omnicompute" / "host.log").read_text(encoding="utf-8"))
         assert android.running() and android.mesh_key(str(tmp_path))
         assert "go.html#c=c" in android.permanent_link(str(tmp_path))
     finally:
@@ -507,8 +507,8 @@ def test_android_entry_point_hosts_and_stops(tmp_path, monkeypatch):
 
 
 def test_gpu_limit_and_changing_limits_from_the_command_line(tmp_path, monkeypatch, capsys):
-    from edgemesh import cli
-    from edgemesh import limits as L
+    from omnicompute import cli
+    from omnicompute import limits as L
 
     lim = L.validate({"cpu": 40, "gpu_limit": 90})
     assert L.effective_for(lim, gpu=True) == (90, "GPU limit") and L.effective_for(lim, gpu=False)[0] == 40
@@ -527,9 +527,9 @@ def test_gpu_limit_and_changing_limits_from_the_command_line(tmp_path, monkeypat
 
 
 def test_browser_and_native_gpu_shaders_are_the_same():
-    from edgemesh import gpu
+    from omnicompute import gpu
 
-    js = Path(__file__).resolve().parent.parent / "edgemesh" / "web" / "gpu.js"
+    js = Path(__file__).resolve().parent.parent / "omnicompute" / "web" / "gpu.js"
     out = subprocess.run(["node", "-e", f"const g = require({str(js)!r}); console.log(JSON.stringify("
                           "[1, 4].map((t) => [g.shaderF16(t), g.shaderQ8(t)])))"], capture_output=True, text=True)
     if out.returncode:
@@ -543,11 +543,11 @@ def test_cpu_and_gpu_split_each_matrix(monkeypatch):
     pytest.importorskip("torch")
     from types import SimpleNamespace
 
-    from edgemesh import limits as L
-    from edgemesh.gpu import open_gpu
-    from edgemesh.worker import Worker
+    from omnicompute import limits as L
+    from omnicompute.gpu import open_gpu
+    from omnicompute.worker import Worker
 
-    monkeypatch.setenv("EDGEMESH_GPU", "torch-cpu")
+    monkeypatch.setenv("OMNICOMPUTE_GPU", "torch-cpu")
     gpu = open_gpu()
     for kw in [dict(arch="gpt2"), dict(arch="llama", n_kv_head=2, tie=True)]:
         cfg, w = random_model(n_layer=2, n_embd=256, **kw)
@@ -562,7 +562,7 @@ def test_cpu_and_gpu_split_each_matrix(monkeypatch):
         np.testing.assert_allclose(g.forward("j", np.array([5], np.int32), 3),
                                    cpu.forward("j", np.array([5], np.int32), 3), atol=1e-4)
 
-    monkeypatch.delenv("EDGEMESH_GPU")
+    monkeypatch.delenv("OMNICOMPUTE_GPU")
     info = {"cpu_score": 30.0, "cores_total": 8, "gpu": {"score": 70.0}}
     wk = Worker(gpu=gpu)
     wk.node = SimpleNamespace(info=info)
@@ -580,7 +580,7 @@ def test_cpu_and_gpu_split_each_matrix(monkeypatch):
 
 
 def test_chat_history_keeps_searches_and_reopens_chats(tmp_path):
-    from edgemesh.chats import ChatHistory
+    from omnicompute.chats import ChatHistory
 
     h = ChatHistory(tmp_path / "chats.json")
     h.keep("a", [{"role": "user", "content": "How do tides work?"}, {"role": "assistant", "content": "The moon", "live": True}])
@@ -595,3 +595,13 @@ def test_chat_history_keeps_searches_and_reopens_chats(tmp_path):
     assert again.chats["b"]["title"] == "Poems"  # a renamed chat keeps its name
     again.delete("a")
     assert [c["id"] for c in ChatHistory(tmp_path / "chats.json").listing()] == ["b"]
+
+
+def test_helpers_never_get_the_first_or_last_layers():
+    from omnicompute.model import plan_layers
+
+    ws = [{"node_id": "helper-fast", "score": 100, "contributor": True}, {"node_id": "laptop", "score": 5},
+          {"node_id": "helper", "score": 50, "contributor": True}, {"node_id": "phone", "score": 2}]
+    plan = plan_layers(24, ws)
+    assert {plan[0][0], plan[-1][0]} == {"laptop", "phone"} and len(plan) == 4
+    assert plan_layers(24, ws[:3])[0][0] == "laptop"  # one own device: it takes the prompt's end

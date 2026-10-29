@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">EdgeMesh</string>
+    <string name="app_name">Omnicompute</string>
     <string name="channel">Hosting</string>
     <string name="hosting">Hosting your AI mesh</string>
     <string name="hosting_text">Your devices can reach it from any network. Tap to open.</string>
@@ -13,5 +13,5 @@
     <string name="stop_hosting">Stop hosting</string>
     <string name="use_key">Use an existing mesh key</string>
     <string name="use_key_text">Paste the mesh key (or full link) of a mesh you already run, and this phone takes over hosting it. Your links and devices keep working.</string>
-    <string name="starting">Starting EdgeMesh…</string>
+    <string name="starting">Starting Omnicompute…</string>
 </resources>

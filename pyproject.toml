@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "edgemesh"
+name = "omnicompute"
 version = "0.6.0"
 description = "Split AI model inference across phones and computers on any network"
 readme = "README.md"
@@ -15,13 +15,13 @@ dependencies = ["numpy>=1.21", "cryptography>=3.4", "aiohttp>=3.8", "tokenizers>
 test = ["pytest", "pytest-asyncio", "playwright", "torch", "transformers"]
 
 [project.scripts]
-edgemesh = "edgemesh.cli:main"
+omnicompute = "omnicompute.cli:main"
 
 [tool.setuptools]
-packages = ["edgemesh"]
+packages = ["omnicompute"]
 
 [tool.setuptools.package-data]
-edgemesh = ["web/*", "installers/*"]
+omnicompute = ["web/*", "installers/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

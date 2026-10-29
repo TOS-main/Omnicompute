@@ -7,10 +7,10 @@ import pytest
 
 gguf = pytest.importorskip("gguf")
 
-from edgemesh.bpe import BYTE_TO_CHAR  # noqa: E402
-from edgemesh.gguf_source import GGUFSource  # noqa: E402
-from edgemesh.model import Shard, random_model  # noqa: E402
-from edgemesh.tokenizer import load_tokenizer  # noqa: E402
+from omnicompute.bpe import BYTE_TO_CHAR  # noqa: E402
+from omnicompute.gguf_source import GGUFSource  # noqa: E402
+from omnicompute.model import Shard, random_model  # noqa: E402
+from omnicompute.tokenizer import load_tokenizer  # noqa: E402
 from test_mesh import model_file  # noqa: E402,F401
 
 SPECIAL = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
@@ -102,7 +102,7 @@ def test_gguf_matches_the_original_model(tmp_path, arch, kw, qname):
     assert (c["n_layer"], c["n_kv_head"], c["head_dim"], c["qkv_bias"], c["qk_norm"], c["tie_embeddings"]) == \
         (2, 2, 64, bool(kw.get("qkv_bias")), bool(kw.get("qk_norm")), kw["tie"])
     w16 = {k: v.astype(np.float16).astype(np.float32) if v.ndim == 2 else v for k, v in w.items()}
-    ref = Shard(cfg, w16, 0, 2)  # EdgeMesh sends big matrices as float16
+    ref = Shard(cfg, w16, 0, 2)  # Omnicompute sends big matrices as float16
     mine = Shard(c, {k: src.get(k).astype(np.float32) for k in ref.w}, 0, 2)
     ids = np.array([3, 1, 4, 1, 5], np.int32)
     a, b = mine.forward("j", ids, 0), ref.forward("j", ids, 0)
@@ -137,8 +137,8 @@ async def test_upload_and_load_a_gguf_then_generate(tmp_path, model_file):
 
     from aiohttp import ClientSession
 
-    from edgemesh.hf import HFSource
-    from edgemesh.model import shard_keys
+    from omnicompute.hf import HFSource
+    from omnicompute.model import shard_keys
     from test_mesh import KEY, start_mesh
 
     torch = pytest.importorskip("torch")

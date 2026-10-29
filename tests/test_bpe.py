@@ -1,4 +1,4 @@
-"""EdgeMesh's pure-Python BPE gives the same tokens as the `tokenizers` package."""
+"""Omnicompute's pure-Python BPE gives the same tokens as the `tokenizers` package."""
 
 import json
 import re
@@ -10,11 +10,11 @@ import pytest
 tokenizers = pytest.importorskip("tokenizers")
 from tokenizers import Regex, Tokenizer, decoders, models, normalizers, pre_tokenizers, processors, trainers  # noqa: E402
 
-from edgemesh.bpe import LLAMA3_SPLIT, QWEN2_SPLIT  # noqa: E402
-from edgemesh.hf import pick_gguf  # noqa: E402
+from omnicompute.bpe import LLAMA3_SPLIT, QWEN2_SPLIT  # noqa: E402
+from omnicompute.hf import pick_gguf  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ((ROOT / "README.md").read_text(encoding="utf-8") + (ROOT / "edgemesh" / "hub.py").read_text(encoding="utf-8")
+CORPUS = ((ROOT / "README.md").read_text(encoding="utf-8") + (ROOT / "omnicompute" / "hub.py").read_text(encoding="utf-8")
           + " Héllo wörld, naïve café 東京 タワー Привет мир 12345 3.14159 don't I'll we've ✓✱ 🚀🔥\n\n\t tabs  double  spaces")
 TESTS = ["Hello world!", "  leading spaces and trailing  ", "don't stop, I'LL go; we've 12345678 apples",
          "東京タワー Привет, мир! naïve café", "line1\nline2\r\n\n  indented\ttab", "emoji 🚀🔥 and ✓",
@@ -53,8 +53,8 @@ def _train(kind, split, path):
 def test_pure_bpe_matches_tokenizers(tmp_path, monkeypatch, kind, split, no_regex):
     if no_regex:  # Termux may not have the regex module either
         monkeypatch.setitem(sys.modules, "regex", None)
-        monkeypatch.delitem(sys.modules, "edgemesh.bpe", raising=False)
-    from edgemesh.tokenizer import _pure_from_json
+        monkeypatch.delitem(sys.modules, "omnicompute.bpe", raising=False)
+    from omnicompute.tokenizer import _pure_from_json
 
     ref = _train(kind, split, tmp_path / "t.json")
     mine = _pure_from_json(tmp_path / "t.json")
@@ -67,7 +67,7 @@ def test_pure_bpe_matches_tokenizers(tmp_path, monkeypatch, kind, split, no_rege
 def test_hf_tokenizer_works_without_the_tokenizers_package(tmp_path, monkeypatch):
     _train("byte", QWEN2_SPLIT, tmp_path / "tokenizer.json")
     (tmp_path / "tokenizer_config.json").write_text(json.dumps({"eos_token": "<|im_end|>"}))
-    from edgemesh.tokenizer import HFTokenizer
+    from omnicompute.tokenizer import HFTokenizer
 
     fast = HFTokenizer(tmp_path)
     monkeypatch.setitem(sys.modules, "tokenizers", None)

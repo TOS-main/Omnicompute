@@ -1,4 +1,6 @@
-# EdgeMesh
+# Omnicompute
+
+*Formerly EdgeMesh.*
 
 Run one AI model across several devices (phones, laptops, desktops), even when they sit on
 different Wi-Fi networks or on cellular data. Each device holds a slice of the model's layers,
@@ -17,24 +19,24 @@ and activations hop from device to device for every token.
 
 ## Quick start (no setup, any network)
 
-The project page, https://tos-main.github.io/edgemesh/, has every command below with copy buttons.
+The project page, https://tos-main.github.io/omnicompute/, has every command below with copy buttons.
 
 **Start your own mesh** on the device that stays on (a phone works well):
 
-* Android: install the app from [the latest release](https://github.com/TOS-main/edgemesh/releases/latest/download/edgemesh.apk). It hosts in the background, starts again after a restart, and has a Stop button in its notification. No Termux needed.
-* Windows (PowerShell): `$env:EDGEMESH_HOST="1"; irm https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/install.ps1 | iex`
-* Mac / Linux: `curl -fsSL https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/install.sh | EDGEMESH_HOST=1 sh`
+* Android: install the app from [the latest release](https://github.com/TOS-main/omnicompute/releases/latest/download/omnicompute.apk). It hosts in the background, starts again after a restart, and has a Stop button in its notification. No Termux needed.
+* Windows (PowerShell): `$env:OMNICOMPUTE_HOST="1"; irm https://raw.githubusercontent.com/TOS-main/omnicompute/main/omnicompute/installers/install.ps1 | iex`
+* Mac / Linux: `curl -fsSL https://raw.githubusercontent.com/TOS-main/omnicompute/main/omnicompute/installers/install.sh | OMNICOMPUTE_HOST=1 sh`
 
-The main device prints a **permanent link** (`https://tos-main.github.io/edgemesh/go.html#c=CODE`). It always finds the main device, even after its Cloudflare address or Wi-Fi address changes. Each mesh gets its own random Cloudflare address, with no account needed.
+The main device prints a **permanent link** (`https://tos-main.github.io/omnicompute/go.html#c=CODE`). It always finds the main device, even after its Cloudflare address or Wi-Fi address changes. Each mesh gets its own random Cloudflare address, with no account needed.
 
 **Add your other devices** from any network: open the permanent link in a browser, or install with the code:
 
-* Windows: `$env:EDGEMESH_CODE="CODE"; irm https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/install.ps1 | iex`
-* Mac / Linux: `curl -fsSL https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/install.sh | EDGEMESH_CODE=CODE sh`
+* Windows: `$env:OMNICOMPUTE_CODE="CODE"; irm https://raw.githubusercontent.com/TOS-main/omnicompute/main/omnicompute/installers/install.ps1 | iex`
+* Mac / Linux: `curl -fsSL https://raw.githubusercontent.com/TOS-main/omnicompute/main/omnicompute/installers/install.sh | OMNICOMPUTE_CODE=CODE sh`
 
-The installer asks how many cores to use, and whether to keep the computer awake while it helps. Change these later with `edgemesh limits --use both --cpu 50 --gpu 80 --cores 4 --awake on`. That command works on a running contributor, and the CPU and GPU each have their own limit.
+The installer asks how many cores to use, and whether to keep the computer awake while it helps. Change these later with `omnicompute limits --use both --cpu 50 --gpu 80 --cores 4 --awake on`. That command works on a running contributor, and the CPU and GPU each have their own limit.
 
-**Help the creator's public mesh:** use `EDGEMESH_CODE=creator`, or run the installer with no code and choose 3. Helpers only compute. Answers are never shown to devices on a contribute link, unless the mesh owner turns that on.
+**Help the creator's public mesh:** use `OMNICOMPUTE_CODE=creator`, or run the installer with no code and choose 3. Helpers only compute. Answers are never shown to devices on a contribute link, unless the mesh owner turns that on.
 
 ## Quick start (from source)
 
@@ -44,7 +46,7 @@ The installer asks how many cores to use, and whether to keep the computer awake
 
 ```
 pip install .
-edgemesh host            # add --public for a link that works from any network (see below)
+omnicompute host            # add --public for a link that works from any network (see below)
 ```
 
 It prints two links and two one-line installers:
@@ -65,54 +67,54 @@ It prints two links and two one-line installers:
 
 The installers come from your main computer itself (no GitHub or website needed). They say what
 they will do and ask first, install into a folder of their own (no admin rights), install Python
-on Windows with winget if it's missing, and start `edgemesh contribute`: a background process
+on Windows with winget if it's missing, and start `omnicompute contribute`: a background process
 with no window that starts again whenever you sign in. It is not hidden: it shows in Task Manager
-/ Activity Monitor, logs to `~/.edgemesh/contribute.log`, and is removed with
-`edgemesh contribute --uninstall` on that computer or **Remove** on the main computer's Devices
+/ Activity Monitor, logs to `~/.omnicompute/contribute.log`, and is removed with
+`omnicompute contribute --uninstall` on that computer or **Remove** on the main computer's Devices
 tab (which also deletes the installed files). Only install it on computers you own or are allowed
 to use. It starts at sign-in, not before: running before anyone signs in would need an admin service.
 
 **3. Chat** on the Chat tab of any device with the full link. The conversation is kept by the
 main computer, so every controller sees the same chat and answers stream onto all of them.
 Each answer shows which devices computed it and how much of the work each did. From a terminal:
-`edgemesh run "<link>" "Once upon a time" --max-new 50`.
+`omnicompute run "<link>" "Once upon a time" --max-new 50`.
 
 ### The mesh key
 
-The main computer makes its mesh key once and keeps it in `~/.edgemesh/mesh.key`
-(`%USERPROFILE%\.edgemesh\mesh.key` on Windows), so links and installed devices keep working
-after restarts and updates. To pick your own, run `edgemesh host --key my-own-key` once; it is
-saved and used from then on. `edgemesh links` (option 3 in the menu) prints the key and both
+The main computer makes its mesh key once and keeps it in `~/.omnicompute/mesh.key`
+(`%USERPROFILE%\.omnicompute\mesh.key` on Windows), so links and installed devices keep working
+after restarts and updates. To pick your own, run `omnicompute host --key my-own-key` once; it is
+saved and used from then on. `omnicompute links` (option 3 in the menu) prints the key and both
 links again. If a device says "wrong mesh key", its link is from another mesh or for another
-port: copy it again from `edgemesh links`.
+port: copy it again from `omnicompute links`.
 
 ### A phone as the main computer
 
 A phone stays on with the screen off, so it can host instead of a laptop that sleeps. Install
-**Termux** (from F-Droid or GitHub), then paste the line `edgemesh links` prints on the current
-main computer: `curl -fsSL "http://MAIN:8000/termux.sh?k=KEY" | sh`. It installs EdgeMesh in
+**Termux** (from F-Droid or GitHub), then paste the line `omnicompute links` prints on the current
+main computer: `curl -fsSL "http://MAIN:8000/termux.sh?k=KEY" | sh`. It installs Omnicompute in
 Termux, keeps your mesh key (so only the address in your links changes), starts hosting with an
 https `--public` link, and holds a wake lock. By default the phone only coordinates
 (`--no-worker`), which uses little battery; the setup can also let it compute on the side, capped
-at 50% (`edgemesh-host --compute` / `--no-compute`). Other phones can compute natively in Termux
-too, which is usually faster than the browser page: `curl -fsSL "http://MAIN:8000/termux.sh?c=CONTRIBUTE-KEY" | sh`. `edgemesh-host` starts it again,
-`edgemesh-host-stop` stops it, and with the Termux:Boot app it starts after a restart. Set
+at 50% (`omnicompute-host --compute` / `--no-compute`). Other phones can compute natively in Termux
+too, which is usually faster than the browser page: `curl -fsSL "http://MAIN:8000/termux.sh?c=CONTRIBUTE-KEY" | sh`. `omnicompute-host` starts it again,
+`omnicompute-host-stop` stops it, and with the Termux:Boot app it starts after a restart. Set
 Termux's battery setting to Unrestricted. Hosting downloads the model to the phone, so it needs
 the free space.
 
 ## Devices on other networks (school, cellular)
 
-`edgemesh host --public` opens a free Cloudflare quick tunnel and prints an `https://….trycloudflare.com`
+`omnicompute host --public` opens a free Cloudflare quick tunnel and prints an `https://….trycloudflare.com`
 link (new address on every start). It is ordinary web traffic, so it gets through most school and
 office networks, and https lets phones and Chromebooks use WebGPU. Other options; pass the address
-with `edgemesh host --public-url https://…` so the Connect tab shows it:
+with `omnicompute host --public-url https://…` so the Connect tab shows it:
 
 - **Tailscale** (or ZeroTier): a private network across all your devices; use the main computer's
   100.x address. Fastest for your own devices, since they can connect directly. Tailscale Funnel
   can also publish an https address.
 - **ngrok**: `ngrok http 8000`, like Cloudflare; a free account gets a fixed address.
 - **Port forwarding**: forward TCP+UDP 8000 on your router. Not possible on cellular/CGNAT.
-- **A small cloud server** running `edgemesh host --no-worker`.
+- **A small cloud server** running `omnicompute host --no-worker`.
 
 ## Models
 
@@ -120,16 +122,16 @@ Load any supported model straight from Hugging Face, either from the **Model** b
 page (paste a repo id or link) or on the command line:
 
 ```
-edgemesh host --model Qwen/Qwen2.5-0.5B-Instruct
-edgemesh host --model hf:meta-llama/Llama-3.2-1B-Instruct --hf-token hf_...   # gated models
-edgemesh host --model ./my-local-hf-folder
+omnicompute host --model Qwen/Qwen2.5-0.5B-Instruct
+omnicompute host --model hf:meta-llama/Llama-3.2-1B-Instruct --hf-token hf_...   # gated models
+omnicompute host --model ./my-local-hf-folder
 ```
 
 Supported architectures: **Llama 2/3.x, Mistral, Qwen2/2.5/3, Phi-3, SmolLM/SmolLM2, TinyLlama,
 GPT-2**, and any fine-tune of them (instruct, roleplay, "uncensored"/abliterated, merges). The repo
 needs `.safetensors` weights and a `tokenizer.json`; GGUF-only repos aren't supported yet. Only the
 hub downloads (with resume); it memory-maps the files and sends each device just its layers as
-float16. The model's own chat template is applied when "Chat format" is on. `edgemesh pull <repo>`
+float16. The model's own chat template is applied when "Chat format" is on. `omnicompute pull <repo>`
 downloads ahead of time.
 
 Rough sizes at float16: 0.5B params ≈ 1 GB, 1.5B ≈ 3 GB, 3B ≈ 6 GB, 7-8B ≈ 15 GB, spread across
@@ -142,7 +144,7 @@ GGUF models load too: Q4_0/Q4_K/Q5_K/Q6_K/Q8_0/F16 and the rest that llama.cpp w
 Llama, Mistral, Qwen 2/3 and Phi-3 families. On the Models tab:
 
 - files in LM Studio's models folder on the main computer (`~/.lmstudio/models`) are listed under
-  Downloaded models with a Load button (more folders: `EDGEMESH_GGUF_DIRS`);
+  Downloaded models with a Load button (more folders: `OMNICOMPUTE_GGUF_DIRS`);
 - **Import a GGUF file** loads one by its path on the main computer, or uploads one from the device
   you're on (in 32 MB pieces, so it works through the https link and resumes if it drops);
 - a Hugging Face repo that only has GGUF files downloads its Q4_K_M file, or the one you name:
@@ -152,7 +154,7 @@ The main computer expands each device's layers to float16 when it sends them, so
 compute exactly as with safetensors models. Models split into several GGUF files, Gemma and
 long-context (LongRoPE) Phi-3.5 aren't supported yet.
 
-Tokenizers: the main computer uses the `tokenizers` package when it is installed and EdgeMesh's
+Tokenizers: the main computer uses the `tokenizers` package when it is installed and Omnicompute's
 own pure-Python BPE otherwise (so a phone in Termux can host), with the same tokens.
 
 ## How it works
@@ -205,11 +207,11 @@ command line with `--cpu 60 --schedule "22:00-07:00=100,09:00-17:00=0" --always`
 - **Always use**: by default a device that would slow the mesh down (the extra network hop costs
   more than it saves) waits on standby; this keeps it in the split anyway.
 - **Use GPU**: on by default. NVIDIA cards use CUDA when PyTorch's CUDA build is installed (the
-  installers offer it when they find an NVIDIA card; or run `edgemesh gpu --install-cuda`), with
+  installers offer it when they find an NVIDIA card; or run `omnicompute gpu --install-cuda`), with
   float16 weights. Other PCs use WebGPU (`wgpu`: Direct3D 12, Metal or Vulkan, so AMD, Intel and
   Apple GPUs too), and browsers use WebGPU when the page is https (the `--public` link) or
   localhost. On WebGPU the weights are 8-bit with one scale per 128 rows, which halves the memory
-  each token reads (about twice as fast; `EDGEMESH_WEIGHTS=16` keeps float16). `edgemesh gpu`
+  each token reads (about twice as fast; `OMNICOMPUTE_WEIGHTS=16` keeps float16). `omnicompute gpu`
   shows which GPU is used and its speed. A device uses the GPU only when it measures faster than
   its CPU; the usage % applies to the GPU too.
 

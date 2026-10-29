@@ -1,4 +1,4 @@
-// The EdgeMesh app: Python (Chaquopy) runs the same hub as `edgemesh host --public`, a
+// The Omnicompute app: Python (Chaquopy) runs the same hub as `omnicompute host --public`, a
 // foreground service keeps it alive with the screen off, and the screen is a web view of the
 // hub's own page. cloudflared (built for Android by .github/workflows/android.yml) gives it an
 // address that works from any network.
@@ -9,17 +9,17 @@ plugins {
     id("com.chaquo.python")
 }
 
-val edgemeshVersion = Regex("""version = "([^"]+)"""").find(rootProject.file("../pyproject.toml").readText())!!.groupValues[1]
+val omnicomputeVersion = Regex("""version = "([^"]+)"""").find(rootProject.file("../pyproject.toml").readText())!!.groupValues[1]
 
 android {
-    namespace = "io.github.tosmain.edgemesh"
+    namespace = "io.github.tosmain.omnicompute"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "io.github.tosmain.edgemesh"
+        applicationId = "io.github.tosmain.omnicompute"
         minSdk = 26
         targetSdk = 34
-        versionName = edgemeshVersion
+        versionName = omnicomputeVersion
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
@@ -28,11 +28,11 @@ android {
         create("release") {
             // A private key from the repository secrets when there is one; otherwise the shared
             // key in this folder, so every build of the open-source app installs over the last.
-            val own = System.getenv("EDGEMESH_KEYSTORE")
+            val own = System.getenv("OMNICOMPUTE_KEYSTORE")
             storeFile = if (own != null) file(own) else rootProject.file("shared-release.keystore")
-            storePassword = System.getenv("EDGEMESH_KEYSTORE_PASSWORD") ?: "edgemesh"
-            keyAlias = System.getenv("EDGEMESH_KEY_ALIAS") ?: "edgemesh"
-            keyPassword = System.getenv("EDGEMESH_KEY_PASSWORD") ?: "edgemesh"
+            storePassword = System.getenv("OMNICOMPUTE_KEYSTORE_PASSWORD") ?: "omnicompute"
+            keyAlias = System.getenv("OMNICOMPUTE_KEY_ALIAS") ?: "omnicompute"
+            keyPassword = System.getenv("OMNICOMPUTE_KEY_PASSWORD") ?: "omnicompute"
         }
     }
 
@@ -53,17 +53,17 @@ android {
     packaging { jniLibs { useLegacyPackaging = true } }
 }
 
-// the edgemesh package itself, from the repository root
-val copyEdgemesh by tasks.registering(Copy::class) {
-    from(rootProject.file("../edgemesh")) { exclude("**/__pycache__/**", "**/*.pyc") }
-    into(layout.buildDirectory.dir("python-src/edgemesh"))
+// the omnicompute package itself, from the repository root
+val copyOmnicompute by tasks.registering(Copy::class) {
+    from(rootProject.file("../omnicompute")) { exclude("**/__pycache__/**", "**/*.pyc") }
+    into(layout.buildDirectory.dir("python-src/omnicompute"))
 }
-tasks.configureEach { if (name.contains("PythonSources")) dependsOn(copyEdgemesh) }
+tasks.configureEach { if (name.contains("PythonSources")) dependsOn(copyOmnicompute) }
 
 chaquopy {
     defaultConfig {
         version = "3.11"
-        extractPackages("edgemesh")  // the hub reads its web page and installers as files
+        extractPackages("omnicompute")  // the hub reads its web page and installers as files
         pip {
             install("numpy")
             install("cryptography")

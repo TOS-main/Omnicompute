@@ -4,8 +4,8 @@ import subprocess
 import numpy as np
 import pytest
 
-from edgemesh.model import Shard, random_model
-from edgemesh.protocol import decode_tensors, encode_tensors, pack
+from omnicompute.model import Shard, random_model
+from omnicompute.protocol import decode_tensors, encode_tensors, pack
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="needs node.js")
 

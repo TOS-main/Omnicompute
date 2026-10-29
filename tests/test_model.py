@@ -1,7 +1,7 @@
 import numpy as np
 
-from edgemesh.model import DictSource, Shard, plan_layers, random_model, shard_tensors
-from edgemesh.protocol import decode_tensors, encode_tensors
+from omnicompute.model import DictSource, Shard, plan_layers, random_model, shard_tensors
+from omnicompute.protocol import decode_tensors, encode_tensors
 
 
 def full_logits(cfg, w, ids):
@@ -54,7 +54,7 @@ def test_plan_respects_memory():
 
 
 def test_best_plan_skips_devices_that_only_add_latency():
-    from edgemesh.estimate import best_plan
+    from omnicompute.estimate import best_plan
 
     cfg, _ = random_model(n_layer=8, n_embd=128)
     pc = {"node_id": "pc", "score": 50, "mem_mb": 8000, "kind": "native", "rtt_ms": 1}
@@ -70,7 +70,7 @@ def test_best_plan_skips_devices_that_only_add_latency():
 def test_ws_parts_roundtrip():
     import os
 
-    from edgemesh.wsparts import Joiner, split
+    from omnicompute.wsparts import Joiner, split
 
     data = os.urandom(3 * (1 << 20) + 5)
     parts = split(data)

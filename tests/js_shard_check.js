@@ -1,6 +1,6 @@
 // Usage: node js_shard_check.js <request.bin>  -> writes logits tensor pack to stdout
 const fs = require("fs");
-const { Shard, decodeTensors, encodeTensors, unpackMsg } = require("../edgemesh/web/model.js");
+const { Shard, decodeTensors, encodeTensors, unpackMsg } = require("../omnicompute/web/model.js");
 const [hdr, payload] = unpackMsg(new Uint8Array(fs.readFileSync(process.argv[2])));
 const w = decodeTensors(payload);
 const ids = w["__ids__"]; delete w["__ids__"];

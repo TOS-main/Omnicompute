@@ -23,7 +23,7 @@ jobs:
       - run: pip install -e . && sudo apt-get install -y iproute2 iptables
       - run: sudo -E env PATH="$PATH" PY="$(which python)" scripts/nat_sim.sh
   app:
-    # one-file apps people can double-click: edgemesh.exe (Windows), edgemesh (macOS, Linux)
+    # one-file apps people can double-click: omnicompute.exe (Windows), omnicompute (macOS, Linux)
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -35,4 +35,4 @@ jobs:
       - run: pip install pyinstaller .
       - run: python scripts/build_app.py
       - uses: actions/upload-artifact@v4
-        with: { name: "edgemesh-${{ runner.os }}", path: dist/ }
+        with: { name: "omnicompute-${{ runner.os }}", path: dist/ }

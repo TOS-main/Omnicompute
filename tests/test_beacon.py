@@ -6,10 +6,10 @@ import json
 import pytest
 from aiohttp import web
 
-from edgemesh import beacon
-from edgemesh.crypto import contribute_key
-from edgemesh.hub import Hub
-from edgemesh.node import parse_join_url
+from omnicompute import beacon
+from omnicompute.crypto import contribute_key
+from omnicompute.hub import Hub
+from omnicompute.node import parse_join_url
 from test_mesh import KEY, model_file  # noqa: F401
 
 
@@ -44,18 +44,18 @@ def test_sealed_and_topic_follow_the_contribute_key():
 
 def test_permanent_links_parse():
     ck = contribute_key(KEY)
-    assert parse_join_url(f"https://bob.github.io/edgemesh/go.html#c={ck}") == ("beacon:", ck)
-    assert parse_join_url(f"https://bob.github.io/edgemesh/go.html#k={KEY}") == ("beacon:", KEY)
+    assert parse_join_url(f"https://bob.github.io/omnicompute/go.html#c={ck}") == ("beacon:", ck)
+    assert parse_join_url(f"https://bob.github.io/omnicompute/go.html#k={KEY}") == ("beacon:", KEY)
     assert parse_join_url(ck) == ("beacon:", ck)
 
 
 async def test_a_worker_follows_the_host_to_a_new_address(model_file, monkeypatch, tmp_path):
-    from edgemesh import cli
+    from omnicompute import cli
 
     runner, url, topics = await fake_ntfy()
-    monkeypatch.setenv("EDGEMESH_BEACON", url)
+    monkeypatch.setenv("OMNICOMPUTE_BEACON", url)
     monkeypatch.setattr(cli, "HOME", tmp_path)
-    monkeypatch.setenv("EDGEMESH_SCORE", "5")
+    monkeypatch.setenv("OMNICOMPUTE_SCORE", "5")
     hub = Hub(KEY, "127.0.0.1", 0, model_file[0])
     await hub.start()
     assert await beacon.publish(KEY, {"url": f"http://127.0.0.1:{hub.port}"})

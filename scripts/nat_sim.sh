@@ -46,18 +46,18 @@ router home1 10.0.0.2 laptop 192.168.1 0
 router home2 10.0.0.3 desktop 192.168.2 0
 router cell 10.0.0.4 phone 100.64.0 1
 
-export PYTHONPATH="$ROOT" EDGEMESH_HOME="$LOGS/home" EDGEMESH_BEACON=off
-ip netns exec wan $PY -m edgemesh -v host --key $KEY --no-worker --port 8000 >"$LOGS/hub.log" 2>&1 &
+export PYTHONPATH="$ROOT" OMNICOMPUTE_HOME="$LOGS/home" OMNICOMPUTE_BEACON=off
+ip netns exec wan $PY -m omnicompute -v host --key $KEY --no-worker --port 8000 >"$LOGS/hub.log" 2>&1 &
 sleep 2
 declare -A SCORE=([laptop]=2 [desktop]=1 [phone]=3)  # chain laptop -> desktop -> phone (the fastest goes last)
 for d in laptop desktop phone; do
-  EDGEMESH_SCORE=${SCORE[$d]} ip netns exec $d $PY -m edgemesh -v join "http://10.0.0.1:8000/?k=$KEY" --name $d --always --cpu 100 >"$LOGS/$d.log" 2>&1 &
+  OMNICOMPUTE_SCORE=${SCORE[$d]} ip netns exec $d $PY -m omnicompute -v join "http://10.0.0.1:8000/?k=$KEY" --name $d --always --cpu 100 >"$LOGS/$d.log" 2>&1 &
 done
 sleep 3
-ip netns exec wan $PY -m edgemesh run "http://10.0.0.1:8000/?k=$KEY" "hello from three networks" --max-new 20 \
+ip netns exec wan $PY -m omnicompute run "http://10.0.0.1:8000/?k=$KEY" "hello from three networks" --max-new 20 \
   >"$LOGS/run.out" 2>"$LOGS/run.err"
 cat "$LOGS/run.out"; echo; cat "$LOGS/run.err"
-ip netns exec wan $PY -m edgemesh status "http://10.0.0.1:8000/?k=$KEY" | grep -E '"node_id"|public_udp' -A2 | grep -vE 'kind|role|platform|score|mem' || true
+ip netns exec wan $PY -m omnicompute status "http://10.0.0.1:8000/?k=$KEY" | grep -E '"node_id"|public_udp' -A2 | grep -vE 'kind|role|platform|score|mem' || true
 sleep 4  # let the background punch attempts to the symmetric NAT time out
 echo "--- path decisions ---"
 grep -hE "direct UDP path|hole punching failed|falling back" "$LOGS"/laptop.log "$LOGS"/desktop.log "$LOGS"/phone.log || true

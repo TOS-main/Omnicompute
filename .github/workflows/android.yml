@@ -1,13 +1,13 @@
-# Builds the EdgeMesh Android app and publishes it as the "android" release, so the newest APK
-# is always at https://github.com/<owner>/<repo>/releases/latest/download/edgemesh.apk
+# Builds the Omnicompute Android app and publishes it as the "android" release, so the newest APK
+# is always at https://github.com/<owner>/<repo>/releases/latest/download/omnicompute.apk
 name: Android app
 
 on:
   push:
     branches: [main]
-    paths: ["edgemesh/**", "android/**", "pyproject.toml", ".github/workflows/android.yml"]
+    paths: ["omnicompute/**", "android/**", "pyproject.toml", ".github/workflows/android.yml"]
   pull_request:
-    paths: ["edgemesh/**", "android/**", "pyproject.toml", ".github/workflows/android.yml"]
+    paths: ["omnicompute/**", "android/**", "pyproject.toml", ".github/workflows/android.yml"]
   workflow_dispatch:
 
 permissions:
@@ -75,15 +75,15 @@ jobs:
         run: |
           if [ -n "$KEYSTORE_B64" ]; then
             echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
-            echo "EDGEMESH_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "OMNICOMPUTE_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
           fi
 
       - name: Build the APK
         working-directory: android
         env:
-          EDGEMESH_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          EDGEMESH_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          EDGEMESH_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          OMNICOMPUTE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          OMNICOMPUTE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          OMNICOMPUTE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           # aiohttp and friends have no Android wheels: build their pure-Python versions
           AIOHTTP_NO_EXTENSIONS: "1"
           MULTIDICT_NO_EXTENSIONS: "1"
@@ -92,16 +92,16 @@ jobs:
           PROPCACHE_NO_EXTENSIONS: "1"
         run: |
           # empty secrets mean "use the shared key's defaults"
-          for v in EDGEMESH_KEYSTORE_PASSWORD EDGEMESH_KEY_ALIAS EDGEMESH_KEY_PASSWORD; do
+          for v in OMNICOMPUTE_KEYSTORE_PASSWORD OMNICOMPUTE_KEY_ALIAS OMNICOMPUTE_KEY_PASSWORD; do
             [ -n "$(printenv $v)" ] || unset $v
           done
           gradle --no-daemon assembleRelease
-          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/edgemesh.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/omnicompute.apk"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: edgemesh-apk
-          path: edgemesh.apk
+          name: omnicompute-apk
+          path: omnicompute.apk
 
       - name: Publish as the latest release
         if: github.event_name != 'pull_request'
@@ -110,6 +110,6 @@ jobs:
         run: |
           version=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
           tag="android-v$version-${{ github.run_number }}"
-          gh release create "$tag" edgemesh.apk --title "EdgeMesh $version for Android (build ${{ github.run_number }})" \
-            --notes "Install edgemesh.apk on your phone (allow installing from this source when asked). It hosts your mesh in the background; no Termux needed." \
+          gh release create "$tag" omnicompute.apk --title "Omnicompute $version for Android (build ${{ github.run_number }})" \
+            --notes "Install omnicompute.apk on your phone (allow installing from this source when asked). It hosts your mesh in the background; no Termux needed." \
             --latest

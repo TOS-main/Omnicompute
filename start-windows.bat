@@ -1,5 +1,5 @@
 @echo off
-rem Double-click to install (first time) and start EdgeMesh on Windows.
+rem Double-click to install (first time) and start Omnicompute on Windows.
 cd /d "%~dp0"
 where py >nul 2>nul
 if errorlevel 1 (
@@ -9,9 +9,9 @@ if errorlevel 1 (
 )
 py -m pip install --quiet --upgrade .
 if errorlevel 1 (
-  echo Installing EdgeMesh failed, see the messages above.
+  echo Installing Omnicompute failed, see the messages above.
   pause
   exit /b 1
 )
-py -m edgemesh %*
+py -m omnicompute %*
 pause

@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from edgemesh import tunnel
+from omnicompute import tunnel
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="stand-in script is a shell script")
 

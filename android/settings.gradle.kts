@@ -11,5 +11,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "EdgeMesh"
+rootProject.name = "Omnicompute"
 include(":app")

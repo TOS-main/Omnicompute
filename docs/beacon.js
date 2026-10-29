@@ -1,4 +1,4 @@
-// Finds where a mesh's host is now (see edgemesh/beacon.py): the host posts its address,
+// Finds where a mesh's host is now (see omnicompute/beacon.py): the host posts its address,
 // sealed with a key derived from the contribute key, to a public ntfy topic. Used by the web
 // page to follow a host that moved, and by the permanent link page (docs/go.html).
 

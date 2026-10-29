@@ -12,11 +12,11 @@ playwright = pytest.importorskip("playwright.async_api")
 
 async def test_browser_workers_join_and_generate(model_file, monkeypatch):
     path, cfg, w = model_file
-    monkeypatch.setattr("edgemesh.wsparts.PART", 4096)  # make the hub send layers in many parts
+    monkeypatch.setattr("omnicompute.wsparts.PART", 4096)  # make the hub send layers in many parts
     hub, nodes = await start_mesh(path, [("pc", False, 1000)])
     url = f"http://127.0.0.1:{hub.port}/?k={KEY}"
     async with playwright.async_playwright() as p:
-        exe = os.environ.get("EDGEMESH_CHROMIUM") or ("/opt/pw-browsers/chromium" if os.path.exists("/opt/pw-browsers/chromium") else None)
+        exe = os.environ.get("OMNICOMPUTE_CHROMIUM") or ("/opt/pw-browsers/chromium" if os.path.exists("/opt/pw-browsers/chromium") else None)
         try:
             browser = await p.chromium.launch()
         except Exception:
@@ -91,7 +91,7 @@ async def test_contribute_page_with_webgpu(model_file):
     hub.orchestrator.share_with_helpers = True
     url = f"http://127.0.0.1:{hub.port}/contribute?c={hub.contribute_key}"
     async with playwright.async_playwright() as p:
-        exe = os.environ.get("EDGEMESH_CHROMIUM") or ("/opt/pw-browsers/chromium" if os.path.exists("/opt/pw-browsers/chromium") else None)
+        exe = os.environ.get("OMNICOMPUTE_CHROMIUM") or ("/opt/pw-browsers/chromium" if os.path.exists("/opt/pw-browsers/chromium") else None)
         args = ["--no-sandbox", "--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader"]  # software GPU for CI
         browser = await p.chromium.launch(executable_path=exe, args=args) if exe else await p.chromium.launch(args=args)
         try:
@@ -116,7 +116,7 @@ async def test_contribute_page_with_webgpu(model_file):
                 await asyncio.sleep(0.1)
             assert hub.clients["chromebook"].info["uses"] == "gpu"
             events, ids = await collect(hub, "webgpu", 8)
-            assert [p[0] for p in events[0]["plan"]] == ["chromebook", "pc"]
+            assert [p[0] for p in events[0]["plan"]] == ["pc", "chromebook"]  # helpers stay off the prompt end
             assert ids == reference(cfg, w, "webgpu", 8)
             await page.wait_for_function("document.getElementById('wstatus').textContent.includes('GPU')", timeout=5000)
             await page.wait_for_function("document.getElementById('lastcredit').textContent.includes('% of the work')", timeout=5000)
@@ -160,7 +160,7 @@ async def test_core_picker_limits_a_browser_worker(model_file):
     hub, nodes = await start_mesh(path, [("pc", False, 1000)])
     url = f"http://127.0.0.1:{hub.port}/contribute?c={hub.contribute_key}"
     async with playwright.async_playwright() as p:
-        exe = os.environ.get("EDGEMESH_CHROMIUM") or ("/opt/pw-browsers/chromium" if os.path.exists("/opt/pw-browsers/chromium") else None)
+        exe = os.environ.get("OMNICOMPUTE_CHROMIUM") or ("/opt/pw-browsers/chromium" if os.path.exists("/opt/pw-browsers/chromium") else None)
         browser = await p.chromium.launch(executable_path=exe, args=["--no-sandbox"]) if exe else await p.chromium.launch()
         try:
             ctx = await browser.new_context()

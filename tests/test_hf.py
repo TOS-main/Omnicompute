@@ -6,8 +6,8 @@ import json
 import numpy as np
 import pytest
 
-from edgemesh.hf import HFSource
-from edgemesh.model import Shard, shard_tensors
+from omnicompute.hf import HFSource
+from omnicompute.model import Shard, shard_tensors
 
 torch = pytest.importorskip("torch")
 transformers = pytest.importorskip("transformers")
@@ -78,7 +78,7 @@ def test_tokenizer_chat_template_and_eos(tmp_path):
     tokenizers = pytest.importorskip("tokenizers")
     from tokenizers import Tokenizer, models, pre_tokenizers, decoders, trainers
 
-    from edgemesh.tokenizer import HFTokenizer
+    from omnicompute.tokenizer import HFTokenizer
 
     tok = Tokenizer(models.BPE())
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)

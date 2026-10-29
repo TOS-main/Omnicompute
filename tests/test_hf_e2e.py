@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from aiohttp import ClientSession, web
 
-import edgemesh.hf as hf
+import omnicompute.hf as hf
 from test_mesh import KEY, model_file, start_mesh  # noqa: F401
 
 torch = pytest.importorskip("torch")

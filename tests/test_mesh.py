@@ -5,11 +5,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from edgemesh.hub import Hub
-from edgemesh.limits import LimitStore
-from edgemesh.model import Shard, random_model, save_model
-from edgemesh.node import MeshNode
-from edgemesh.worker import Worker
+from omnicompute.hub import Hub
+from omnicompute.limits import LimitStore
+from omnicompute.model import Shard, random_model, save_model
+from omnicompute.node import MeshNode
+from omnicompute.worker import Worker
 
 KEY = "test-key"
 

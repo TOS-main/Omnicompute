@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>EdgeMesh link</title>
+<title>Omnicompute link</title>
 <style>
   :root { --bg: #f6f7f9; --card: #fff; --text: #14161a; --muted: #5c6370; --accent: #3b6ff5; --bad: #c4321c; }
   @media (prefers-color-scheme: dark) { :root { --bg: #0f1115; --card: #181b22; --text: #e8eaef; --muted: #9aa2b1; --accent: #6d93ff; --bad: #ff6b55; } }
@@ -35,7 +35,7 @@ const link = (origin) => full ? `${origin}/?k=${encodeURIComponent(key)}` : `${o
 
 async function go() {
   if (!key) {
-    $("title").textContent = "Open an EdgeMesh link";
+    $("title").textContent = "Open an Omnicompute link";
     $("text").textContent = "Paste the link or contribute code you were given.";
     $("actions").innerHTML = '<form id="f"><input id="v" placeholder="https://…/go.html#c=… or c1234…"><button>Open</button></form>';
     $("f").onsubmit = (e) => { e.preventDefault(); const v = $("v").value.trim(); location.hash = v.includes("#") ? v.split("#")[1] : `c=${v}`; location.reload(); };
