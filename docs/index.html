@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EdgeMesh</title>
+<meta name="description" content="Run one AI model across your own phones and computers, from any network.">
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --text: #14161a; --muted: #5c6370; --accent: #3b6ff5; --code: #eef1f6; --ok: #0f8a5f; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0f1115; --card: #181b22; --text: #e8eaef; --muted: #9aa2b1; --accent: #6d93ff; --code: #0b0d12; --ok: #3fcf95; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  header h1 { font-size: 32px; margin: 0; } header p { color: var(--muted); margin: 6px 0 24px; font-size: 18px; }
+  .card { background: var(--card); border-radius: 14px; padding: 20px; margin: 16px 0; box-shadow: 0 2px 12px #0001; }
+  h2 { font-size: 20px; margin: 0 0 6px; } h3 { font-size: 15px; margin: 16px 0 4px; }
+  p, li { color: var(--muted); } p { margin: 6px 0; }
+  pre { background: var(--code); border-radius: 10px; padding: 10px 12px; margin: 4px 0; white-space: pre-wrap; word-break: break-all; font-size: 13px; position: relative; }
+  pre button { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 3px 8px; margin: 0; }
+  a.btn, button { display: inline-block; background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 10px 16px; font: inherit; text-decoration: none; margin: 6px 6px 0 0; cursor: pointer; }
+  a.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .help { border: 1px solid var(--ok); }
+  .help h2 { color: var(--ok); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>EdgeMesh</h1>
+    <p>Run one AI model across your own phones and computers, even when they're on different networks. Free and open source.</p>
+  </header>
+
+  <div class="card">
+    <h2>1. Start your own mesh</h2>
+    <p>One device is the main device: it holds the chat page and hands out the work. A phone works well, since it's always on.</p>
+    <h3>Android phone (recommended)</h3>
+    <p>Install the app. It hosts your mesh in the background, with a notification you can stop it from.</p>
+    <a class="btn" id="apk" href="#">Download the Android app</a>
+    <h3>Windows (PowerShell)</h3>
+    <pre data-cmd="host-ps"></pre>
+    <h3>Mac or Linux (Terminal)</h3>
+    <pre data-cmd="host-sh"></pre>
+    <h3>Android without the app (Termux)</h3>
+    <pre data-cmd="host-termux"></pre>
+    <p>The main device shows a <b>permanent link</b> and a contribute code. They keep working when its address changes.</p>
+  </div>
+
+  <div class="card">
+    <h2>2. Add your other devices</h2>
+    <p>On a phone or tablet, just open the permanent contribute link. On a computer, paste one line and enter the code your main device shows. It runs in the background, uses the GPU, and lets you pick how many cores and how much power to use.</p>
+    <h3>Windows (PowerShell)</h3>
+    <pre data-cmd="join-ps"></pre>
+    <h3>Mac or Linux (Terminal)</h3>
+    <pre data-cmd="join-sh"></pre>
+    <p>Change it later: <code>edgemesh limits --cpu 50 --gpu 80 --cores 4 --awake on</code>. Remove it: <code>edgemesh contribute --uninstall</code>.</p>
+  </div>
+
+  <div class="card help">
+    <h2>Or help the creator's mesh</h2>
+    <p>Lend spare power to the public mesh of the person who makes EdgeMesh. You only compute; you never see anyone's chats, and nothing else on your device is shared. Stop any time.</p>
+    <a class="btn" id="helpnow" href="#">Help from this browser</a>
+    <h3>Windows (PowerShell)</h3>
+    <pre data-cmd="creator-ps"></pre>
+    <h3>Mac or Linux (Terminal)</h3>
+    <pre data-cmd="creator-sh"></pre>
+  </div>
+
+  <p><a id="source" href="#">Source code on GitHub</a> · <a href="go.html">Open a mesh link</a></p>
+</main>
+<script>
+"use strict";
+// Forks: put your own contribute code here (and in edgemesh/project.py).
+const CREATOR_CODE = "cfb109c420aa15d6f1ad769a9";
+
+// owner.github.io/repo -> owner/repo, so a fork's page points at the fork
+const owner = location.hostname.endsWith(".github.io") ? location.hostname.split(".")[0] : "TOS-main";
+const repoName = location.hostname.endsWith(".github.io") ? (location.pathname.split("/")[1] || "edgemesh") : "edgemesh";
+const REPO = `${owner}/${repoName}`;
+const RAW = `https://raw.githubusercontent.com/${REPO}/main/edgemesh/installers`;
+const ps = (env) => `${env}irm ${RAW}/install.ps1 | iex`;
+const sh = (env, file = "install.sh") => `curl -fsSL ${RAW}/${file} | ${env}sh`;
+const cmds = {
+  "host-ps": ps('$env:EDGEMESH_HOST="1"; '),
+  "host-sh": sh("EDGEMESH_HOST=1 "),
+  "host-termux": sh("", "termux-host.sh"),
+  "join-ps": ps(""),
+  "join-sh": sh(""),
+  "creator-ps": ps('$env:EDGEMESH_CODE="creator"; '),
+  "creator-sh": sh("EDGEMESH_CODE=creator "),
+};
+for (const pre of document.querySelectorAll("pre[data-cmd]")) {
+  const text = cmds[pre.dataset.cmd];
+  pre.textContent = text;
+  const b = document.createElement("button");
+  b.textContent = "Copy";
+  b.onclick = async () => { try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; } catch { b.textContent = "Select and copy"; } };
+  pre.append(b);
+}
+document.getElementById("apk").href = `https://github.com/${REPO}/releases/latest/download/edgemesh.apk`;
+document.getElementById("source").href = `https://github.com/${REPO}`;
+document.getElementById("helpnow").href = `go.html#c=${CREATOR_CODE}`;
+</script>
+</body>
+</html>

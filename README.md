@@ -15,7 +15,29 @@ and activations hop from device to device for every token.
                    └──────────────┘               └──────────────┘           └───────────────────┘
 ```
 
-## Quick start
+## Quick start (no setup, any network)
+
+The project page, https://tos-main.github.io/edgemesh/, has every command below with copy buttons.
+
+**Start your own mesh** on the device that stays on (a phone works well):
+
+* Android: install the app from [the latest release](https://github.com/TOS-main/edgemesh/releases/latest/download/edgemesh.apk). It hosts in the background, starts again after a restart, and has a Stop button in its notification. No Termux needed.
+* Windows (PowerShell): `$env:EDGEMESH_HOST="1"; irm https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/install.ps1 | iex`
+* Mac / Linux: `curl -fsSL https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/install.sh | EDGEMESH_HOST=1 sh`
+
+The main device prints a **permanent link** (`https://tos-main.github.io/edgemesh/go.html#c=CODE`). It always finds the main device, even after its Cloudflare address or Wi-Fi address changes. Each mesh gets its own random Cloudflare address, with no account needed.
+
+**Add your other devices** from any network: open the permanent link in a browser, or install with the code:
+
+* Windows: `$env:EDGEMESH_CODE="CODE"; irm https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/install.ps1 | iex`
+* Mac / Linux: `curl -fsSL https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/install.sh | EDGEMESH_CODE=CODE sh`
+
+The installer asks how many cores to use, and whether to keep the computer awake while it helps. Change these later with `edgemesh limits --cpu 50 --gpu 80 --cores 4 --awake on`. That command works on a running contributor, and the CPU and GPU each have their own limit.
+
+**Help the creator's public mesh:** use `EDGEMESH_CODE=creator`, or run the installer with no code and choose 3. Helpers only compute. Answers are never shown to devices on a contribute link, unless the mesh owner turns that on.
+
+## Quick start (from source)
+
 
 **1. Start the main computer** (it also contributes its own compute). On Windows double-click
 `start-windows.bat`; on macOS/Linux run `sh start-mac-linux.sh`. Or:
