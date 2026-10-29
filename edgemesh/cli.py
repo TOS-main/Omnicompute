@@ -50,30 +50,62 @@ def _demo_model() -> str:
     return str(path)
 
 
-async def _run_worker(url: str, key: str, name: str, relay_only: bool, mem_fraction: float, forever: bool = True):
+async def _run_worker(url: str, key: str, name: str, relay_only: bool, mem_fraction: float, forever: bool = True,
+                      cpu: int | None = None, schedule: str | None = None, always: bool | None = None,
+                      hub_machine: bool = False):
+    from . import limits as L
     from .node import MeshNode
+    from .gpu import open_gpu
     from .worker import Worker, worker_info
 
-    info = worker_info(mem_fraction)
+    gpu = open_gpu()
+    info = {**worker_info(mem_fraction, gpu), "hub_machine": hub_machine}
+    overrides = {}
+    if cpu is not None:
+        overrides["cpu"] = cpu
+    if schedule:
+        overrides["schedule"] = L.parse_schedule(schedule)
+    if always is not None:
+        overrides["always"] = always
+    store = L.LimitStore(HOME / f"limits-{name}.json", overrides)
     while True:
         node = MeshNode(name, key, url, info, allow_direct=not relay_only)
-        Worker().attach(node)
+        worker = Worker(store, gpu).attach(node)
+        worker.on_uninstall = lambda: _uninstall(name)
+        watcher = None
         try:
             await node.start()
-            print(f"[{name}] joined {url}  (speed {info['score']} GFLOP/s, offering {info['mem_mb']} MB, "
-                  f"public UDP {node.public_addr or 'unknown'})", flush=True)
+            cpu_now, why = L.effective(store.limits)
+            gpu_note = f", GPU {gpu.name} {info['gpu']['score']} GFLOP/s" if gpu else ", no usable GPU (using the CPU)"
+            print(f"[{name}] joined {url}  (CPU {info['cpu_score']} GFLOP/s{gpu_note}, offering {info['mem_mb']} MB, "
+                  f"usage limit {cpu_now}% ({why}), public UDP {node.public_addr or 'unknown'})", flush=True)
+            watcher = asyncio.ensure_future(worker.watch_schedule())
             await node.closed.wait()
         except (OSError, PermissionError) as e:
             print(f"[{name}] could not join {url}: {e}", flush=True)
             if isinstance(e, PermissionError):
                 return
         finally:
+            if watcher:
+                watcher.cancel()
             if hasattr(node, "ws"):
                 await node.close()
         if not forever:
             return
         await asyncio.sleep(3)
         print(f"[{name}] reconnecting...", flush=True)
+
+
+def _uninstall(name: str) -> list[str]:
+    """The main computer removed this device: stop for good (no autostart) and delete what the
+    one-line installer put here. Exits the process shortly after replying."""
+    from . import background
+
+    removed = background.uninstall(HOME)
+    print(f"[{name}] removed from the mesh by the main computer; "
+          + (f"deleting {', '.join(removed)}" if removed else "autostart turned off"), flush=True)
+    asyncio.get_running_loop().call_later(0.5, os._exit, 0)
+    return removed
 
 
 def _open_model(spec: str | None, token: str | None):
@@ -120,6 +152,10 @@ async def cmd_host(args) -> None:
     from .hub import Hub
 
     key = _mesh_key(args.key)
+    from .crypto import is_contribute_key
+
+    if is_contribute_key(key):
+        sys.exit("That is a contribute-only key; the main computer needs the full mesh key.")
     token = args.hf_token or os.environ.get("HF_TOKEN")
     try:
         source = await _load_source(args.model, token)
@@ -129,34 +165,115 @@ async def cmd_host(args) -> None:
     await hub.start()
     hub.lan_origin = f"http://{_lan_ip()}:{hub.port}"
     lan = f"{hub.lan_origin}/?k={key}"
-    print("\nEdgeMesh hub is running.\n")
-    print(f"  Open on any phone/PC on this network:  {lan}")
-    print(f"  From other networks (Wi-Fi elsewhere, cellular): forward TCP+UDP port {hub.port} on this")
-    print(f"  machine's router, or run the hub on a cloud VM, and use http://<public-ip>:{hub.port}/?k={key}")
-    print(f"  Add a PC/Mac as a worker:              edgemesh join \"{lan}\"")
+    tunnel = None
+    public = None
+    if args.public:
+        from . import tunnel as T
+
+        try:
+            tunnel, origin = await T.start(hub.port, HOME)
+            hub.public_origin = origin
+            public = f"{origin}/?k={key}"
+        except Exception as e:
+            print(f"  (could not open the public tunnel: {e})")
+    if args.public_url:  # e.g. a Tailscale, ngrok or VPS address that forwards to this port
+        hub.public_origin = args.public_url.rstrip("/")
+        public = f"{hub.public_origin}/?k={key}"
+    print("\nEdgeMesh is running.\n")
+    print(f"  Open on this network (Wi-Fi/LAN):   {lan}")
+    if public:
+        print(f"  Open from ANYWHERE (school, cellular): {public}")
+        print("  (this address changes each time you restart; scan the QR code below or copy it)")
+        _print_qr(public)
+    else:
+        print("  From other networks (school, cellular): restart with  --public  for an https link that")
+        print(f"  works anywhere, or forward TCP+UDP port {hub.port} on this machine's router.")
+    origin = hub.public_origin or hub.lan_origin
+    ck = hub.contribute_key
+    print(f"  Contribute-only link (no chat or settings): {origin}/contribute?c={ck}")
+    print("  Add a computer in one line (it then contributes in the background):")
+    print(f"    Windows PowerShell:  irm \"{origin}/install.ps1?c={ck}\" | iex")
+    print(f"    Mac / Linux:         curl -fsSL \"{origin}/install.sh?c={ck}\" | sh")
     print(f"  Model: {hub.orchestrator.cfg.get('name')} ({hub.orchestrator.cfg['n_layer']} layers). "
           "Load another from Hugging Face on the web page.\n", flush=True)
     tasks = []
     if not args.no_worker:
         tasks.append(asyncio.ensure_future(_run_worker(f"http://127.0.0.1:{hub.port}", key,
-                                                       f"{socket.gethostname()[:20]}-host", False, args.mem)))
+                                                       f"{socket.gethostname()[:20]}-host", False, args.mem,
+                                                       cpu=args.cpu, schedule=args.schedule, hub_machine=True)))
     try:
         await asyncio.Event().wait()
     finally:
         for t in tasks:
             t.cancel()
+        if tunnel:
+            tunnel.kill()
         await hub.close()
+
+
+def _print_qr(text: str) -> None:
+    try:
+        import segno
+
+        segno.make(text, error="l").terminal(compact=True)
+    except Exception:
+        pass
+
+
+def _log_to(path: str) -> None:
+    """Background mode (pythonw has no console): send all output to a log file."""
+    f = open(path, "a", buffering=1, encoding="utf-8")
+    sys.stdout = sys.stderr = f
+    logging.getLogger().handlers.clear()
+    logging.basicConfig(stream=f, level=logging.INFO, format="%(asctime)s %(name)s %(message)s", force=True)
 
 
 async def cmd_join(args) -> None:
     from .node import parse_join_url
 
+    if args.log:
+        _log_to(args.log)
     url, key = parse_join_url(args.url)
     key = args.key or key
     if not key:
         sys.exit("The join link needs the mesh key (…/?k=KEY), or pass --key.")
     name = args.name or f"{socket.gethostname()[:20]}-{secrets.token_hex(2)}"
-    await _run_worker(url, key, name, args.relay_only, args.mem)
+    await _run_worker(url, key, name, args.relay_only, args.mem, cpu=args.cpu, schedule=args.schedule,
+                      always=True if args.always else None)
+
+
+def cmd_contribute(args) -> None:
+    from . import background
+
+    if args.uninstall:
+        background.stop(HOME, quiet=True)
+        removed = background.uninstall(HOME)
+        print("EdgeMesh stopped and won't start at login anymore."
+              + (f" Deleting {', '.join(removed)}." if removed else ""))
+        return
+    if args.stop:
+        background.stop(HOME)
+        return
+    if not args.url:
+        sys.exit("usage: edgemesh contribute LINK   (or --stop)")
+    from .node import parse_join_url
+
+    url, key = parse_join_url(args.url)
+    if not key:
+        sys.exit("The link needs a key (…/contribute?c=KEY or …/?k=KEY).")
+    name = args.name or f"{socket.gethostname()[:20]}-{secrets.token_hex(2)}"
+    extra = []
+    if args.cpu is not None:
+        extra += ["--cpu", str(args.cpu)]
+    if args.schedule:
+        extra += ["--schedule", args.schedule]
+    from .crypto import is_contribute_key
+
+    link = f"{url}/contribute?c={key}" if is_contribute_key(key) else f"{url}/?k={key}"
+    pid = background.start(link, name, HOME, extra, autostart=not args.no_autostart)
+    print(f"EdgeMesh is contributing in the background as '{name}' (process {pid}).")
+    print("It starts again when you log in." if not args.no_autostart else "It stops when you log out.")
+    print(f"Log: {HOME / 'contribute.log'}   Stop: edgemesh contribute --stop")
 
 
 async def cmd_run(args) -> None:
@@ -219,7 +336,8 @@ def _interactive() -> list[str]:
     choice = input("\nChoose 1 or 2: ").strip()
     if choice == "2":
         return ["join", input("Paste the join link: ").strip()]
-    return ["host"]
+    public = input("Let devices on other networks join too (school, cellular)? [y/N]: ").strip().lower()
+    return ["host", "--public"] if public.startswith("y") else ["host"]
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -239,6 +357,10 @@ def main(argv: list[str] | None = None) -> None:
     h.add_argument("--bind", default="0.0.0.0")
     h.add_argument("--key", help="mesh key (default: generated once, stored in ~/.edgemesh)")
     h.add_argument("--no-worker", action="store_true", help="don't run layers on the hub machine itself")
+    h.add_argument("--public", action="store_true",
+                   help="also open a free Cloudflare https tunnel so devices on any network can join")
+    h.add_argument("--public-url", help="an address you set up yourself that reaches this port (Tailscale, "
+                                        "ngrok, a VPS, port forwarding); shown on the Connect page")
     h.add_argument("--mem", type=float, default=0.5, help="fraction of RAM to offer (default 0.5)")
 
     j = sub.add_parser("join", help="contribute this device's compute to a mesh")
@@ -247,6 +369,18 @@ def main(argv: list[str] | None = None) -> None:
     j.add_argument("--name")
     j.add_argument("--relay-only", action="store_true", help="skip hole punching, always use the relay")
     j.add_argument("--mem", type=float, default=0.5)
+    j.add_argument("--always", action="store_true", help="always give this device layers, even if it is slow")
+    j.add_argument("--log", help="write output to this file instead of the console (background mode)")
+
+    b = sub.add_parser("contribute", help="contribute quietly in the background, and again after every login")
+    b.add_argument("url", nargs="?", help="contribute link (…/contribute?c=KEY) or join link")
+    b.add_argument("--name")
+    b.add_argument("--stop", action="store_true", help="stop contributing and remove the autostart entry")
+    b.add_argument("--uninstall", action="store_true", help="stop, remove autostart, and delete what the installer added")
+    b.add_argument("--no-autostart", action="store_true", help="don't start again at login")
+    for sp in (h, j, b):
+        sp.add_argument("--cpu", type=int, help="usage limit in percent (default 80; 0 = paused)")
+        sp.add_argument("--schedule", help='time-of-day limits, e.g. "22:00-07:00=100,09:00-17:00=0"')
 
     r = sub.add_parser("run", help="run a prompt on the mesh")
     r.add_argument("url")
@@ -275,7 +409,7 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(name)s %(message)s")
-    fn = {"host": cmd_host, "join": cmd_join, "run": cmd_run, "status": cmd_status,
+    fn = {"host": cmd_host, "join": cmd_join, "contribute": cmd_contribute, "run": cmd_run, "status": cmd_status,
           "make-model": cmd_make_model, "pull": cmd_pull}[args.cmd]
     try:
         if asyncio.iscoroutinefunction(fn):

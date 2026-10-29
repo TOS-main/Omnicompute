@@ -126,11 +126,6 @@ def _f32(w: np.ndarray) -> np.ndarray:
     return w if w.dtype == np.float32 else w.astype(np.float32)
 
 
-def _mm(x: np.ndarray, w: np.ndarray, b: np.ndarray | None = None) -> np.ndarray:
-    y = x @ _f32(w)
-    return y + _f32(b) if b is not None else y
-
-
 def _layernorm(x, w, b, eps=1e-5):
     mu = x.mean(-1, keepdims=True)
     var = ((x - mu) ** 2).mean(-1, keepdims=True)
@@ -204,6 +199,29 @@ class Shard:
         self.llama = cfg.get("arch", "gpt2") == "llama"
         self.inv_freq = rope_inv_freq(cfg) if self.llama else None
         self.caches: OrderedDict[str, dict] = OrderedDict()
+        self.gpu = None  # optional gpu.GPU holding the weight matrices (see use_gpu)
+
+    def use_gpu(self, gpu) -> None:
+        """Move every weight matrix (and a tied output head) to the GPU, freeing the CPU copies."""
+        for name in [n for n, t in self.w.items() if t.ndim == 2 and (n.endswith(".w") or n == "lm_head")]:
+            gpu.put(name, self.w.pop(name))
+        tied = None if "lm_head" in self.w or not self.last else "embed" if self.llama else "wte"
+        if tied:
+            gpu.put(tied + "^T", self.w[tied].T)
+        self.gpu = gpu
+
+    def _mms(self, x: np.ndarray, names: list[str]) -> list[np.ndarray]:
+        """[x @ W + b for each weight name], on the GPU when the weights are there."""
+        w = self.w
+        if self.gpu is not None and all(self.gpu.has(n) for n in names):
+            ys = self.gpu.mm_many(x, names)
+        else:
+            ys = [x @ _f32(w[n]) for n in names]
+        out = []
+        for n, y in zip(names, ys):
+            b = w.get(n[:-2] + ".b") if n.endswith(".w") else None
+            out.append(y + _f32(b) if b is not None else y)
+        return out
 
     def forward(self, job: str, x: np.ndarray, pos: int) -> np.ndarray:
         cache = self.caches.pop(job, None)
@@ -230,10 +248,14 @@ class Shard:
         if self.last:
             if self.llama:
                 h = _rmsnorm(x[-1:], w["norm_f"], self.cfg["rms_eps"])
-                head = w["lm_head"] if "lm_head" in w else w["embed"].T
+                tied = "embed"
             else:
                 h = _layernorm(x[-1:], w["ln_f.w"], w["ln_f.b"])
-                head = w["wte"].T
+                tied = "wte"
+            name = "lm_head" if self.gpu is not None and self.gpu.has("lm_head") else tied + "^T"
+            if self.gpu is not None and self.gpu.has(name):
+                return self.gpu.mm_many(h, [name])[0][0].astype(np.float32)
+            head = w["lm_head"] if "lm_head" in w else w[tied].T
             return (h @ _f32(head))[0].astype(np.float32)
         return x
 
@@ -253,12 +275,12 @@ class Shard:
         H = self.cfg["n_head"]
         T, D = x.shape
         h = _layernorm(x, w[p + "ln_1.w"], w[p + "ln_1.b"])
-        qkv = _mm(h, w[p + "attn.c_attn.w"], w[p + "attn.c_attn.b"])
+        qkv, = self._mms(h, [p + "attn.c_attn.w"])
         q, k, v = (a.reshape(T, H, D // H).transpose(1, 0, 2) for a in np.split(qkv, 3, axis=-1))
         k, v = self._cache(kv, i, k, v)
-        x = x + _mm(_attend(q, k, v, pos), w[p + "attn.c_proj.w"], w[p + "attn.c_proj.b"])
+        x = x + self._mms(_attend(q, k, v, pos), [p + "attn.c_proj.w"])[0]
         h = _layernorm(x, w[p + "ln_2.w"], w[p + "ln_2.b"])
-        x = x + _mm(_gelu(_mm(h, w[p + "mlp.c_fc.w"], w[p + "mlp.c_fc.b"])), w[p + "mlp.c_proj.w"], w[p + "mlp.c_proj.b"])
+        x = x + self._mms(_gelu(self._mms(h, [p + "mlp.c_fc.w"])[0]), [p + "mlp.c_proj.w"])[0]
         return x.astype(np.float32)
 
     def _llama_block(self, i: int, x: np.ndarray, pos: int, kv: dict) -> np.ndarray:
@@ -266,17 +288,18 @@ class Shard:
         H, KV, hd, eps = c["n_head"], c["n_kv_head"], c["head_dim"], c["rms_eps"]
         T = x.shape[0]
         h = _rmsnorm(x, w[p + "attn_norm"], eps)
-        q = _mm(h, w[p + "q.w"], w.get(p + "q.b")).reshape(T, H, hd).transpose(1, 0, 2)
-        k = _mm(h, w[p + "k.w"], w.get(p + "k.b")).reshape(T, KV, hd).transpose(1, 0, 2)
-        v = _mm(h, w[p + "v.w"], w.get(p + "v.b")).reshape(T, KV, hd).transpose(1, 0, 2)
+        q, k, v = self._mms(h, [p + "q.w", p + "k.w", p + "v.w"])
+        q = q.reshape(T, H, hd).transpose(1, 0, 2)
+        k = k.reshape(T, KV, hd).transpose(1, 0, 2)
+        v = v.reshape(T, KV, hd).transpose(1, 0, 2)
         if p + "q_norm" in w:  # Qwen3: per-head RMSNorm on q and k
             q, k = _rmsnorm(q, w[p + "q_norm"], eps), _rmsnorm(k, w[p + "k_norm"], eps)
         q, k = _rope(q, pos, self.inv_freq), _rope(k, pos, self.inv_freq)
         k, v = self._cache(kv, i, k.astype(np.float32), v)
-        x = x + _mm(_attend(q, k, v, pos), w[p + "o.w"])
+        x = x + self._mms(_attend(q, k, v, pos), [p + "o.w"])[0]
         h = _rmsnorm(x, w[p + "mlp_norm"], eps)
-        g = _mm(h, w[p + "gate.w"])
-        x = x + _mm(g / (1 + np.exp(-g)) * _mm(h, w[p + "up.w"]), w[p + "down.w"])
+        g, u = self._mms(h, [p + "gate.w", p + "up.w"])
+        x = x + self._mms(g / (1 + np.exp(-g)) * u, [p + "down.w"])[0]
         return x.astype(np.float32)
 
 
@@ -285,20 +308,32 @@ class Shard:
 
 def plan_layers(n_layer: int, workers: list[dict], cfg: dict | None = None,
                 bytes_per_param: int = 4) -> list[tuple[str, int, int]]:
-    """Split layers into contiguous ranges, proportional to each worker's speed score,
+    """Split layers into contiguous ranges, in proportion to each worker's speed score,
     without exceeding any worker's memory budget. Returns [(node_id, start, end)].
 
-    A worker may report "weight_factor" (browser workers expand float16 to float32: 2)."""
-    ws = sorted(workers, key=lambda w: -w.get("score", 1.0))
-    if not ws:
+    The last device also computes the output head (a vocab-sized matrix, often as big as
+    several layers), so the fastest device goes last and gets correspondingly fewer layers.
+    A worker may report "weight_factor" to scale how much memory its weights take."""
+    if not workers:
         raise RuntimeError("no workers available")
-    ws = ws[:n_layer]
-    total = sum(max(w.get("score", 1.0), 1e-3) for w in ws)
-    counts = [max(1, round(n_layer * max(w.get("score", 1.0), 1e-3) / total)) for w in ws]
+    ws = sorted(workers, key=lambda w: -w.get("score", 1.0))[:n_layer]
+    ws = ws[1:] + ws[:1]  # fastest last
+    scores = [max(w.get("score", 1.0), 1e-3) for w in ws]
+    head_units = 0.0
+    if cfg is not None and len(ws) > 1:
+        per_layer = max(shard_bytes(cfg, 1, 2) if n_layer > 1 else shard_bytes(cfg, 0, 1), 1)
+        head_units = shard_bytes(cfg, n_layer, n_layer) / per_layer  # head compute, in layers
+    units = n_layer + head_units
+    want = [units * sc / sum(scores) for sc in scores]
+    want[-1] -= head_units
+    counts = [max(1, round(x)) for x in want]
     while sum(counts) > n_layer:
-        counts[counts.index(max(counts))] -= 1
+        i = max(range(len(counts)), key=lambda j: counts[j] - want[j])
+        if counts[i] <= 1:
+            i = counts.index(max(counts))
+        counts[i] -= 1
     while sum(counts) < n_layer:
-        counts[counts.index(min(counts))] += 1
+        counts[min(range(len(counts)), key=lambda j: counts[j] - want[j])] += 1
 
     if cfg is not None:  # respect memory budgets by moving layers to workers with room
         per_layer = shard_bytes(cfg, 1, 2, bytes_per_param) if n_layer > 2 else \
@@ -307,12 +342,17 @@ def plan_layers(n_layer: int, workers: list[dict], cfg: dict | None = None,
         last_extra = shard_bytes(cfg, n_layer, n_layer, bytes_per_param)
         embed_layers = -(-first_extra // per_layer)
         head_layers = -(-last_extra // per_layer)
-        ws, counts = list(ws), list(counts)
         mems = [w.get("mem_mb", 1 << 20) * 1024 * 1024 / w.get("weight_factor", 1) for w in ws]
         if len(ws) > 1 and mems[0] // per_layer < embed_layers + 1:  # first device also holds the embeddings
-            big = mems.index(max(mems))
+            big = max(range(len(ws) - 1), key=lambda i: mems[i])
             ws[0], ws[big] = ws[big], ws[0]
             mems[0], mems[big] = mems[big], mems[0]
+            counts[0], counts[big] = counts[big], counts[0]
+        if len(ws) > 1 and mems[-1] // per_layer < head_layers + 1:  # last device also holds the head
+            big = max(range(1, len(ws)), key=lambda i: mems[i])
+            ws[-1], ws[big] = ws[big], ws[-1]
+            mems[-1], mems[big] = mems[big], mems[-1]
+            counts[-1], counts[big] = counts[big], counts[-1]
         caps = [int(m // per_layer) for m in mems]
         caps[0] -= embed_layers
         if len(ws) > 1:
@@ -328,10 +368,11 @@ def plan_layers(n_layer: int, workers: list[dict], cfg: dict | None = None,
                                    f"(needs about {need:.1f} GB in total)")
             counts[over[0]] -= 1
             counts[room[0]] += 1
-        if counts[0] == 0:
-            raise RuntimeError("no connected device has enough memory to hold the model's embeddings")
-        keep = [i for i, c in enumerate(counts) if c > 0]
-        ws, counts = [ws[i] for i in keep], [counts[i] for i in keep]
+        if 0 in counts:  # a device ended up with nothing (too little memory): plan again without it
+            keep = [w for w, c in zip(ws, counts) if c > 0]
+            if not keep:
+                raise RuntimeError("no connected device has enough memory to hold the model's embeddings")
+            return plan_layers(n_layer, keep, cfg, bytes_per_param)
 
     plan, start = [], 0
     for w, c in zip(ws, counts):

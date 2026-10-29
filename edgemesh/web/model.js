@@ -94,11 +94,35 @@ class Shard {
     this.llama = cfg.arch === "llama";
     if (this.llama) this.inv = ropeInvFreq(cfg);
     this.caches = new Map(); // job -> {len, k: {layer: Float32Array}, v: {...}}
+    this.pool = null; // optional multi-core backend (see worker.js); null = compute here
+  }
+
+  // y[T,N] = x[T,K] @ W[name] (+ b), on the pool when one is attached
+  async mm(name, x, T, b) {
+    const W = this.w[name];
+    if (this.pool && this.pool.has(name)) {
+      const y = await this.pool.mm(name, x, T);
+      if (b) { const N = b.length; for (let i = 0; i < T; i++) for (let j = 0; j < N; j++) y[i * N + j] += b[j]; }
+      return y;
+    }
+    return matmul(x, T, W.shape[0], W.data, W.shape[1], b);
+  }
+
+  // logits for one row with a tied head: dot products with every embedding row
+  async tiedHead(name, n) {
+    if (this.pool && this.pool.has(name + "^T")) return this.pool.mm(name + "^T", n, 1);
+    const emb = this.w[name].data, V = this.cfg.vocab, D = this.cfg.n_embd, logits = new Float32Array(V);
+    for (let t = 0; t < V; t++) {
+      let s = 0;
+      for (let k = 0; k < D; k++) s += n[k] * emb[t * D + k];
+      logits[t] = s;
+    }
+    return logits;
   }
 
   drop(job) { this.caches.delete(job); }
 
-  forward(job, x, pos) {
+  async forward(job, x, pos) {
     const D = this.cfg.n_embd, w = (n) => this.w[n].data;
     let cache = this.caches.get(job);
     if (!cache || cache.len !== pos) {
@@ -122,21 +146,15 @@ class Shard {
       T = x.shape[0];
       h = Float32Array.from(x.data);
     }
-    for (let l = this.start; l < this.end; l++) h = this.llama ? this.llamaBlock(l, h, T, pos, cache) : this.gpt2Block(l, h, T, pos, cache);
+    for (let l = this.start; l < this.end; l++) h = await (this.llama ? this.llamaBlock(l, h, T, pos, cache) : this.gpt2Block(l, h, T, pos, cache));
     cache.len = pos + T;
     if (!this.last) return { data: h, shape: [T, D] };
 
     const V = this.cfg.vocab, row = h.subarray((T - 1) * D, T * D), n = new Float32Array(D);
     if (this.llama) rmsNorm(row, 1, D, w("norm_f"), this.cfg.rms_eps, n);
     else layerNorm(row, 1, D, w("ln_f.w"), w("ln_f.b"), n);
-    if (this.llama && this.w["lm_head"]) return { data: matmul(n, 1, D, w("lm_head"), V, null), shape: [V] };
-    const emb = w(this.llama ? "embed" : "wte"), logits = new Float32Array(V); // tied head: rows of the embedding
-    for (let t = 0; t < V; t++) {
-      let s = 0;
-      for (let k = 0; k < D; k++) s += n[k] * emb[t * D + k];
-      logits[t] = s;
-    }
-    return { data: logits, shape: [V] };
+    if (this.llama && this.w["lm_head"]) return { data: await this.mm("lm_head", n, 1, null), shape: [V] };
+    return { data: await this.tiedHead(this.llama ? "embed" : "wte", n), shape: [V] };
   }
 
   // q: [T, H*hd] (row stride qs, offset qo), keys/values cached as [S, KV*hd]; writes y [T, H*hd]
@@ -168,37 +186,44 @@ class Shard {
     return y;
   }
 
-  kv(cache, i, width) {
-    if (!cache.k[i]) { cache.k[i] = new Float32Array(this.cfg.n_ctx * width); cache.v[i] = new Float32Array(this.cfg.n_ctx * width); }
-    return [cache.k[i], cache.v[i]];
+  // KV cache rows [S, width] for layer i, grown (doubling) to hold `need` positions
+  kv(cache, i, width, need) {
+    let k = cache.k[i], v = cache.v[i];
+    if (!k || k.length < need * width) {
+      const cap = Math.max(need, 64, k ? (2 * k.length) / width : 0) * width;
+      const nk = new Float32Array(cap), nv = new Float32Array(cap);
+      if (k) { nk.set(k); nv.set(v); }
+      cache.k[i] = k = nk; cache.v[i] = v = nv;
+    }
+    return [k, v];
   }
 
-  gpt2Block(i, x, T, pos, cache) {
+  async gpt2Block(i, x, T, pos, cache) {
     const w = (n) => this.w[`h.${i}.${n}`].data;
     const { n_embd: D, n_head: H } = this.cfg, hd = D / H;
     const h = layerNorm(x, T, D, w("ln_1.w"), w("ln_1.b"), new Float32Array(T * D));
-    const qkv = matmul(h, T, D, w("attn.c_attn.w"), 3 * D, w("attn.c_attn.b"));
-    const [K, Vc] = this.kv(cache, i, D);
+    const P = `h.${i}.`, qkv = await this.mm(P + "attn.c_attn.w", h, T, w("attn.c_attn.b"));
+    const [K, Vc] = this.kv(cache, i, D, pos + T);
     for (let t = 0; t < T; t++) {
       K.set(qkv.subarray(t * 3 * D + D, t * 3 * D + 2 * D), (pos + t) * D);
       Vc.set(qkv.subarray(t * 3 * D + 2 * D, t * 3 * D + 3 * D), (pos + t) * D);
     }
     const y = this.attend(qkv, 3 * D, 0, K, Vc, T, pos, H, H, hd);
-    const a = matmul(y, T, D, w("attn.c_proj.w"), D, w("attn.c_proj.b"));
+    const a = await this.mm(P + "attn.c_proj.w", y, T, w("attn.c_proj.b"));
     for (let k = 0; k < a.length; k++) a[k] += x[k];
     const h2 = layerNorm(a, T, D, w("ln_2.w"), w("ln_2.b"), new Float32Array(T * D));
-    const m = matmul(gelu(matmul(h2, T, D, w("mlp.c_fc.w"), 4 * D, w("mlp.c_fc.b"))), T, 4 * D, w("mlp.c_proj.w"), D, w("mlp.c_proj.b"));
+    const m = await this.mm(P + "mlp.c_proj.w", gelu(await this.mm(P + "mlp.c_fc.w", h2, T, w("mlp.c_fc.b"))), T, w("mlp.c_proj.b"));
     for (let k = 0; k < m.length; k++) m[k] += a[k];
     return m;
   }
 
-  llamaBlock(i, x, T, pos, cache) {
+  async llamaBlock(i, x, T, pos, cache) {
     const opt = (n) => (this.w[`h.${i}.${n}`] ? this.w[`h.${i}.${n}`].data : null), w = (n) => this.w[`h.${i}.${n}`].data;
     const { n_embd: D, n_head: H, n_kv_head: KV, head_dim: hd, ffn: F, rms_eps: eps } = this.cfg;
     const h = rmsNorm(x, T, D, w("attn_norm"), eps, new Float32Array(T * D));
-    const q = matmul(h, T, D, w("q.w"), H * hd, opt("q.b"));
-    const k = matmul(h, T, D, w("k.w"), KV * hd, opt("k.b"));
-    const v = matmul(h, T, D, w("v.w"), KV * hd, opt("v.b"));
+    const P = `h.${i}.`;
+    const [q, k, v] = await Promise.all([this.mm(P + "q.w", h, T, opt("q.b")), this.mm(P + "k.w", h, T, opt("k.b")),
+                                         this.mm(P + "v.w", h, T, opt("v.b"))]);
     const qn = opt("q_norm"), kn = opt("k_norm");
     for (let t = 0; t < T; t++) {
       for (let hh = 0; hh < H; hh++) {
@@ -212,16 +237,16 @@ class Shard {
         rope(k, o, hd, pos + t, this.inv);
       }
     }
-    const [K, Vc] = this.kv(cache, i, KV * hd);
+    const [K, Vc] = this.kv(cache, i, KV * hd, pos + T);
     K.set(k, pos * KV * hd);
     Vc.set(v, pos * KV * hd);
     const y = this.attend(q, H * hd, 0, K, Vc, T, pos, H, KV, hd);
-    const a = matmul(y, T, H * hd, w("o.w"), D, null);
+    const a = await this.mm(P + "o.w", y, T, null);
     for (let j = 0; j < a.length; j++) a[j] += x[j];
     const h2 = rmsNorm(a, T, D, w("mlp_norm"), eps, new Float32Array(T * D));
-    const g = matmul(h2, T, D, w("gate.w"), F, null), u = matmul(h2, T, D, w("up.w"), F, null);
+    const [g, u] = await Promise.all([this.mm(P + "gate.w", h2, T, null), this.mm(P + "up.w", h2, T, null)]);
     for (let j = 0; j < g.length; j++) g[j] = (g[j] / (1 + Math.exp(-g[j]))) * u[j];
-    const m = matmul(g, T, F, w("down.w"), D, null);
+    const m = await this.mm(P + "down.w", g, T, null);
     for (let j = 0; j < m.length; j++) m[j] += a[j];
     return m;
   }
@@ -295,12 +320,17 @@ function encodeTensors(tensors) {
   return out;
 }
 
+// Effective GFLOP/s for token-by-token generation on one core: vector x 1024x1024 matrix
+// (4 MB, bigger than most caches), like edgemesh/worker.py's benchmark.
 function benchmark() {
-  const N = 96, a = new Float32Array(N * N).fill(0.5), b = new Float32Array(N);
+  const N = 1024, w = new Float32Array(N * N), x = new Float32Array(N);
+  for (let i = 0; i < w.length; i++) w[i] = ((i * 2654435761) % 1000) / 1000 - 0.5;
+  x.fill(0.5);
+  matmul(x, 1, N, w, N, null);
   let n = 0;
   const t0 = performance.now();
-  while (performance.now() - t0 < 300) { matmul(a, N, N, a, N, b); n++; }
-  return Math.round((n * 2 * N * N * N) / ((performance.now() - t0) / 1000) / 1e7) / 100;
+  while (performance.now() - t0 < 300) { matmul(x, 1, N, w, N, null); n++; }
+  return (n * 2 * N * N) / ((performance.now() - t0) / 1000) / 1e9;
 }
 
 if (typeof module !== "undefined") module.exports = { Shard, packMsg, unpackMsg, decodeTensors, encodeTensors, benchmark };

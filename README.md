@@ -17,31 +17,57 @@ and activations hop from device to device for every token.
 
 ## Quick start
 
-**1. Start a hub** on one computer (it also contributes its own compute):
+**1. Start the main computer** (it also contributes its own compute). On Windows double-click
+`start-windows.bat`; on macOS/Linux run `sh start-mac-linux.sh`. Or:
 
 ```
-pip install .            # or double-click the edgemesh app from the build step below
-edgemesh host            # serves a small random demo model
+pip install .
+edgemesh host            # add --public for a link that works from any network (see below)
 ```
 
-It prints a join link like `http://192.168.1.20:8000/?k=Xy3...`.
+It prints two links and two one-line installers:
+
+- **Full link** `http://192.168.1.20:8000/?k=...`: chat, load models, change every device's limits.
+  Only for your own devices.
+- **Contribute-only link** `http://192.168.1.20:8000/contribute?c=...`: the device can only lend
+  its compute. It sees its own stats and the answer it is helping with, nothing else. Good for a
+  friend's phone or a school Chromebook. Both links work at the same time.
 
 **2. Add devices**
 
 | Device | How |
 |---|---|
-| Android phone, iPhone, iPad, any tablet | Open the join link in the browser, tap **Contribute compute**. No app or Termux needed. Keep the page open with the screen on. |
-| Windows, macOS, Linux | Double-click the app, choose **Join**, paste the link. Or run `edgemesh join "<link>"`. |
+| Phone, tablet, Chromebook | Open a link (or scan the QR code on the Connect tab). With the full link, pick **Controller + worker** on the Devices tab; with the contribute link, tap **Start contributing**. No app or Termux. |
+| Windows | Paste in PowerShell: `irm "http://<main>/install.ps1?c=<key>" \| iex` |
+| macOS, Linux | Paste in Terminal: `curl -fsSL "http://<main>/install.sh?c=<key>" \| sh` |
 
-**3. Run a prompt** from any device that can open the link (the same page has a prompt box), or:
+The installers come from your main computer itself (no GitHub or website needed). They say what
+they will do and ask first, install into a folder of their own (no admin rights), install Python
+on Windows with winget if it's missing, and start `edgemesh contribute`: a background process
+with no window that starts again whenever you sign in. It is not hidden: it shows in Task Manager
+/ Activity Monitor, logs to `~/.edgemesh/contribute.log`, and is removed with
+`edgemesh contribute --uninstall` on that computer or **Remove** on the main computer's Devices
+tab (which also deletes the installed files). Only install it on computers you own or are allowed
+to use. It starts at sign-in, not before: running before anyone signs in would need an admin service.
 
-```
-edgemesh run "<link>" "Once upon a time" --max-new 50
-```
+**3. Chat** on the Chat tab of any device with the full link. The conversation is kept by the
+main computer, so every controller sees the same chat and answers stream onto all of them.
+Each answer shows which devices computed it and how much of the work each did. From a terminal:
+`edgemesh run "<link>" "Once upon a time" --max-new 50`.
 
-**Devices on different networks or on cellular:** the hub has to be reachable from all of them.
-Either run the hub on a small cloud VM (open TCP+UDP port 8000), or forward TCP+UDP 8000 on the
-router of the machine that runs it, then share `http://<public-ip>:8000/?k=<key>`.
+## Devices on other networks (school, cellular)
+
+`edgemesh host --public` opens a free Cloudflare quick tunnel and prints an `https://….trycloudflare.com`
+link (new address on every start). It is ordinary web traffic, so it gets through most school and
+office networks, and https lets phones and Chromebooks use WebGPU. Other options; pass the address
+with `edgemesh host --public-url https://…` so the Connect tab shows it:
+
+- **Tailscale** (or ZeroTier): a private network across all your devices; use the main computer's
+  100.x address. Fastest for your own devices, since they can connect directly. Tailscale Funnel
+  can also publish an https address.
+- **ngrok**: `ngrok http 8000`, like Cloudflare; a free account gets a fixed address.
+- **Port forwarding**: forward TCP+UDP 8000 on your router. Not possible on cellular/CGNAT.
+- **A small cloud server** running `edgemesh host --no-worker`.
 
 ## Models
 
@@ -101,14 +127,37 @@ Browser devices present the key and talk to the hub over the WebSocket; put the 
 (any reverse proxy or tunnel) when you use it across the internet. The hub knows the key, so run
 it yourself; treat the link like a password.
 
+## Usage limits, battery and GPU
+
+Every device has limits, editable on that device or from any controller (Devices tab), and from the
+command line with `--cpu 60 --schedule "22:00-07:00=100,09:00-17:00=0" --always`:
+
+- **Usage %** (default 80, up to 100; 0 pauses). Enforced by resting after each step.
+- **Time windows**: "from 22:00 to 07:00 use 100%", by the device's own clock.
+- **On battery / while charging**: e.g. on battery use 30% and 2 cores, plugged in use 100%.
+  Browsers report charging on Chrome and Edge; native workers read it on Windows, macOS and Linux.
+- **Cores**: how many CPU cores to use at once.
+- **Always use**: by default a device that would slow the mesh down (the extra network hop costs
+  more than it saves) waits on standby; this keeps it in the split anyway.
+- **Use GPU**: on by default. PCs use the graphics card through WebGPU (`wgpu`: Direct3D 12,
+  Metal or Vulkan, so NVIDIA, AMD, Intel and Apple GPUs without CUDA); browsers use WebGPU when the
+  page is https (the `--public` link) or localhost. Weights sit on the GPU as float16. A device
+  uses the GPU only when it measures faster than its CPU; the usage % applies to the GPU too.
+
+The Model tab estimates tok/s and memory per device for any Hugging Face repo before you load it,
+shows the biggest model your devices can hold and run at ~10/5/1 tok/s, lists downloaded models
+with **Load** and **Uninstall**, and defaults the max-token slider to the model's own default.
+
+Phones pause background tabs. "Keep working when this tab is in the background" plays an
+inaudible tone so the tab keeps running; Android may still stop it after a long time.
+
 ## Platforms
 
 | | Contribute compute | Run prompts | Notes |
 |---|---|---|---|
-| Windows / macOS / Linux | native app or `pip install` | yes | direct UDP + relay; numpy (BLAS) speed |
-| Android | browser page | yes | relay only, plain-JS math, keep screen on |
-| iPhone / iPad | browser page (Safari) | yes | same as Android; iOS pauses background tabs |
-| Termux, Pythonista, a-Shell | native client also works | yes | optional |
+| Windows / macOS / Linux | one-line installer, app, or `pip install` | yes | direct UDP + relay; numpy (BLAS) or GPU |
+| Android, ChromeOS | browser page | yes | relay; multi-core JS, WebGPU on https |
+| iPhone / iPad | browser page (Safari) | yes | same; iOS pauses background tabs sooner |
 
 ## Tests
 
@@ -129,12 +178,11 @@ scripts/build_app.py`; CI builds Windows, macOS and Linux versions on every push
 
 ## Limits of this MVP and next steps
 
-- Browser workers compute in plain JavaScript and always use the relay. Next: WebGPU kernels and
-  WebRTC data channels so phones can connect peer to peer too.
+- Browser workers always use the relay. Next: WebRTC data channels so phones connect peer to peer.
+- The GPU path multiplies matrices on the GPU and does the rest on the CPU, with one round trip
+  per group of matrices. Next: whole layers on the GPU, and int8/int4 weights.
 - float16 weights. Next: int8/int4 quantization (4x smaller downloads for phones) and GGUF import.
 - Gemma, Mixtral/MoE and long-context RoPE variants (longrope, yarn) aren't supported yet.
-- Workers get their layers from the hub; next they could fetch them from Hugging Face directly.
-- One generation at a time, one hub. Next: request batching, several models, hub failover.
-- IPv4 only for hole punching; add IPv6 candidates (many cellular networks hand out public IPv6,
-  which needs no punching at all).
-- Native mobile apps (Android/iOS) would allow background running and faster math.
+- One generation at a time, one hub, one shared chat. Next: batching, several models, hub failover.
+- IPv4 only for hole punching; add IPv6 candidates.
+- Native mobile apps would allow real background running on phones.

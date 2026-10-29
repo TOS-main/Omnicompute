@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import struct
 import threading
 import time
@@ -51,7 +52,8 @@ def edgemesh_config(hf: dict, name: str, max_ctx: int = 4096) -> dict:
         "n_kv_head": hf.get("num_key_value_heads") or H,
         "head_dim": hf.get("head_dim") or hf["hidden_size"] // H,
         "ffn": hf["intermediate_size"], "vocab": hf["vocab_size"],
-        "n_ctx": min(hf.get("max_position_embeddings", 2048), max_ctx),
+        "n_ctx": hf.get("max_position_embeddings", 2048),  # the model's own limit
+        "ctx_default": min(hf.get("max_position_embeddings", 2048), max_ctx),
         "rope_theta": hf.get("rope_theta", rp.get("rope_theta", 10000.0)), "rope_scaling": rs,
         "rms_eps": hf.get("rms_norm_eps", 1e-6),
         "tie_embeddings": bool(hf.get("tie_word_embeddings", False)),
@@ -101,6 +103,10 @@ class HFSource:
         hf = json.loads((self.folder / "config.json").read_text())
         self.hf_config = hf
         self.cfg = edgemesh_config(hf, name or self.folder.name)
+        gen = self.folder / "generation_config.json"
+        if gen.exists():  # the model author's suggested sampling settings, used as the web page's defaults
+            g = json.loads(gen.read_text())
+            self.cfg["gen_defaults"] = {k: g[k] for k in ("max_new_tokens", "temperature", "top_p") if k in g}
         self.st = _SafeTensors(self.folder)
         self.dtype = dtype
         self.prefix = next((p for p in ("", "model.", "transformer.") if self._has(p)), "")
@@ -211,6 +217,18 @@ def list_repo_files(repo: str, token: str | None = None, revision: str = "main")
     return {i["path"]: (i.get("lfs") or {}).get("size", i.get("size", 0)) for i in items if i.get("type") == "file"}
 
 
+def remote_config(repo: str, token: str | None = None) -> tuple[dict, int]:
+    """(EdgeMesh config, total download size in bytes) without downloading the weights."""
+    files = list_repo_files(repo, token)
+    weights = [f for f in files if f.endswith(".safetensors")]
+    if not weights:
+        raise ValueError(f"{repo} has no .safetensors weights (only .bin or .gguf files)")
+    with _request(f"{HF}/{repo}/resolve/main/config.json", token) as r:
+        hf = json.load(r)
+    size = sum(files[f] for f in weights + [m for m in META_FILES if m in files])
+    return edgemesh_config(hf, repo), size
+
+
 def download(repo: str, dest_root: Path, token: str | None = None, progress: Download | None = None) -> Path:
     progress = progress or Download(repo)
     files = list_repo_files(repo, token)
@@ -246,16 +264,58 @@ def download(repo: str, dest_root: Path, token: str | None = None, progress: Dow
     return folder
 
 
+def _complete(folder: Path) -> bool:
+    """True when a downloaded model folder has everything needed to load it offline."""
+    if not (folder / "config.json").exists() or not (folder / "tokenizer.json").exists():
+        return False
+    if any(f.suffix == ".part" for f in folder.iterdir()):
+        return False
+    index = folder / "model.safetensors.index.json"
+    if index.exists():
+        return all((folder / f).exists() for f in set(json.loads(index.read_text())["weight_map"].values()))
+    return any(folder.glob("*.safetensors"))
+
+
 def resolve(spec: str, cache: Path, token: str | None = None, progress: Download | None = None) -> HFSource:
     """'hf:org/name', 'org/name' or a local folder -> HFSource (downloading if needed)."""
     path = Path(spec.removeprefix("hf:")).expanduser()
     if not spec.startswith("hf:") and path.is_dir():
         return HFSource(path)
     repo = spec.removeprefix("hf:")
+    local = cache / repo.replace("/", "--")
+    if local.is_dir() and _complete(local):  # already downloaded: no network needed
+        if progress:
+            progress.state = "loading"
+        return HFSource(local, name=repo)
     folder = download(repo, cache, token, progress)
     if progress:
         progress.state = "loading"
     return HFSource(folder, name=repo)
+
+
+def downloaded(cache: Path) -> list[dict]:
+    """Models already on this computer: [{"repo", "bytes", "complete"}]."""
+    out = []
+    if not cache.is_dir():
+        return out
+    for folder in sorted(cache.iterdir()):
+        if not folder.is_dir() or "--" not in folder.name:
+            continue
+        files = [f for f in folder.iterdir() if f.is_file()]
+        complete = _complete(folder)
+        out.append({"repo": folder.name.replace("--", "/", 1), "bytes": sum(f.stat().st_size for f in files),
+                    "complete": complete})
+    return out
+
+
+def remove(cache: Path, repo: str) -> int:
+    """Delete a downloaded model. Returns the bytes freed."""
+    folder = (cache / repo.replace("/", "--")).resolve()
+    if folder.parent != cache.resolve() or not folder.is_dir():
+        raise FileNotFoundError(f"{repo} is not downloaded")
+    freed = sum(f.stat().st_size for f in folder.rglob("*") if f.is_file())
+    shutil.rmtree(folder)
+    return freed
 
 
 class Loader:

@@ -24,24 +24,30 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 from cryptography.exceptions import InvalidTag
 
-from .crypto import MeshCipher
+from .crypto import MeshCipher, contribute_key
 from .messenger import Messenger
 from .protocol import pack, unpack
+from .wsparts import Joiner, split
 
 log = logging.getLogger("edgemesh.hub")
 
 OBSERVE_REQ = b"EMOB"
 OBSERVE_RESP = b"EMOA"
 HUB_ID = "hub"
+INFO_FIELDS = {"limit", "limit_reason", "limits", "score", "mem_mb", "steps", "cores", "power", "uses", "gpu"}
 
 
 class _Client:
-    def __init__(self, node_id: str, ws: web.WebSocketResponse, info: dict, native: bool):
+    def __init__(self, node_id: str, ws: web.WebSocketResponse, info: dict, native: bool, contributor: bool = False):
         self.node_id, self.ws, self.info, self.native = node_id, ws, info, native
+        self.contributor = contributor  # joined with the contribute-only key
         self.udp_addr: tuple[str, int] | None = None
+        self.lock = asyncio.Lock()
 
     async def send(self, header: dict, payload: bytes = b"") -> None:
-        await self.ws.send_bytes(pack(header, payload))
+        async with self.lock:  # parts of one message must not interleave with another's
+            for part in split(pack(header, payload)):
+                await self.ws.send_bytes(part)
 
 
 class _Reflector(asyncio.DatagramProtocol):
@@ -84,7 +90,9 @@ class Hub:
                  models_dir: str | None = None, hf_token: str | None = None):
         """model: a DictSource/HFSource, a path to a .emm file, or None (no model yet)."""
         self.secret = secret
-        self.cipher = MeshCipher(secret)
+        self.contribute_key = contribute_key(secret)
+        self.cipher = MeshCipher(self.contribute_key)  # device-to-device traffic (see crypto.py)
+        self.admin_auth = MeshCipher(secret)
         self.host, self.port = host, port
         self.clients: dict[str, _Client] = {}
         self.endpoint = HubEndpoint(self)
@@ -93,7 +101,11 @@ class Hub:
         from .hf import Loader
 
         self.loader = Loader(Path(models_dir or Path.home() / ".edgemesh" / "models"), hf_token)
-        self.lan_origin: str | None = None  # shown on the web page when it is opened via localhost
+        self.lan_origin: str | None = None
+        self.public_origin: str | None = None  # set by --public (Cloudflare tunnel) or --public-url
+        self.removed: set[str] = set()  # device names taken off the mesh (refused until restart)
+        self.chat: list[dict] = []  # the shared conversation every controller sees
+        self.chat_version = 0
         self._runner = None
         self._udp = None
 
@@ -112,12 +124,24 @@ class Hub:
         app = web.Application(client_max_size=1 << 30)
         app.add_routes([
             web.get("/", self._index),
+            web.get("/contribute", self._contribute_page),
+            web.get("/install.ps1", self._install),
+            web.get("/install.sh", self._install),
+            web.get("/download/edgemesh.zip", self._package),
+            web.get("/api/models", self._models),
+            web.delete("/api/models", self._delete_model),
+            web.get("/api/chat", self._chat_get),
+            web.post("/api/chat/clear", self._chat_clear),
             web.get("/ws", self._ws),
             web.get("/api/status", self._status),
             web.post("/api/generate", self._generate),
             web.get("/api/model", self._model_status),
             web.post("/api/model", self._load_model),
             web.get("/static/{name}", self._static),
+            web.get("/api/qr.svg", self._qr),
+            web.post("/api/devices/{node}/limits", self._set_limits),
+            web.post("/api/devices/{node}/remove", self._remove_device),
+            web.get("/api/estimate", self._estimate),
         ])
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
@@ -127,14 +151,29 @@ class Hub:
         loop = asyncio.get_running_loop()
         self._udp, _ = await loop.create_datagram_endpoint(lambda: _Reflector(self), local_addr=(self.host, self.port))
         log.info("hub listening on tcp+udp port %d", self.port)
+        self._pinger = asyncio.ensure_future(self._ping_loop())
 
     async def close(self) -> None:
+        if getattr(self, "_pinger", None):
+            self._pinger.cancel()
         if self._udp:
             self._udp.close()
         for c in list(self.clients.values()):
             await c.ws.close()
         if self._runner:
             await self._runner.cleanup()
+
+    async def _ping_loop(self) -> None:
+        """Measure each device's round trip to the hub, for speed estimates."""
+        while True:
+            for c in list(self.clients.values()):
+                t0 = asyncio.get_running_loop().time()
+                try:
+                    await self.endpoint.request(c.node_id, {"op": "ping"}, timeout=5)
+                    c.info["rtt_ms"] = round((asyncio.get_running_loop().time() - t0) * 1000, 1)
+                except Exception:
+                    pass
+            await asyncio.sleep(10)
 
     def workers(self) -> list[dict]:
         return [{"node_id": c.node_id, "info": c.info} for c in self.clients.values()]
@@ -173,25 +212,39 @@ class Hub:
             hello = json.loads(first.data) if first.type == WSMsgType.TEXT else unpack(first.data)[0]
             node_id = str(hello.get("node_id", ""))[:64]
             if "mac" in hello:  # native: challenge-response, the secret never crosses the wire
-                ok = self.cipher.verify(f"{nonce}:{node_id}".encode(), hello["mac"])
+                msg = f"{nonce}:{node_id}".encode()
+                admin = self.admin_auth.verify(msg, str(hello["mac"]))
+                ok = admin or self.cipher.verify(msg, str(hello["mac"]))
                 native = True
             else:  # browser: presents the key from its join link
-                ok = hmac.compare_digest(str(hello.get("key", "")), self.secret)
+                given = str(hello.get("key", ""))
+                admin = hmac.compare_digest(given, self.secret)
+                ok = admin or hmac.compare_digest(given, self.contribute_key)
                 native = False
+            if node_id in self.removed and not admin:
+                await ws.send_bytes(pack({"type": "error", "error": "removed from this mesh by the main computer"}))
+                return ws
             if not node_id or node_id == HUB_ID or not ok:
                 await ws.send_bytes(pack({"type": "error", "error": "wrong mesh key"}))
                 return ws
             old = self.clients.get(node_id)
+            if old is not None and not old.contributor and not admin:  # contributors can't take over a device
+                await ws.send_bytes(pack({"type": "error", "error": "that device name is taken"}))
+                return ws
             if old is not None:
                 await old.ws.close()
-            client = _Client(node_id, ws, dict(hello.get("info", {})), native)
+            client = _Client(node_id, ws, dict(hello.get("info", {})), native, contributor=not admin)
+            client.info["contributor"] = not admin
             self.clients[node_id] = client
             await client.send({"type": "welcome", "udp_port": self.port, "observed_ip": request.remote})
             log.info("%s joined: %s %s", node_id, client.info.get("kind"), client.info.get("platform", ""))
+            joiner = Joiner()
             async for msg in ws:
                 if msg.type == WSMsgType.BINARY:
-                    header, payload = unpack(msg.data)
-                    await self._dispatch(client, header, payload)
+                    data = joiner.feed(msg.data)
+                    if data is not None:
+                        header, payload = unpack(data)
+                        await self._dispatch(client, header, payload)
         except (asyncio.TimeoutError, ConnectionError, ValueError, TypeError):
             pass
         finally:
@@ -218,6 +271,9 @@ class Hub:
             else:
                 blob = payload
             await self.route(client.node_id, dst, blob)
+        elif kind == "info":  # a device's limits or status changed
+            fields = header.get("info") or {}
+            client.info.update({k: v for k, v in fields.items() if k in INFO_FIELDS})
         elif kind == "list":
             peers = [{"node_id": c.node_id, "info": c.info} for c in self.clients.values() if c is not client]
             await client.send({"type": "peers", "req": header.get("req"), "peers": peers})
@@ -235,15 +291,160 @@ class Hub:
         key = request.headers.get("X-Mesh-Key") or request.query.get("k", "")
         return hmac.compare_digest(key, self.secret)
 
+    def _may_contribute(self, request: web.Request) -> bool:
+        key = request.query.get("c") or request.query.get("k", "")
+        return hmac.compare_digest(key, self.contribute_key) or hmac.compare_digest(key, self.secret)
+
     async def _index(self, request: web.Request) -> web.Response:
         return web.Response(text=_web_file("index.html"), content_type="text/html")
 
+    async def _contribute_page(self, request: web.Request) -> web.Response:
+        return web.Response(text=_web_file("contribute.html"), content_type="text/html")
+
+    def _origin(self, request: web.Request) -> str:
+        proto = request.headers.get("X-Forwarded-Proto") or request.scheme
+        return f"{proto}://{request.host}"
+
+    async def _install(self, request: web.Request) -> web.Response:
+        """One-line installers: they set up EdgeMesh and start contributing in the background."""
+        if not self._may_contribute(request):
+            raise web.HTTPUnauthorized(text="wrong key")
+        name = "install.ps1" if request.path.endswith(".ps1") else "install.sh"
+        text = (resources.files("edgemesh").joinpath("installers", name).read_text(encoding="utf-8")
+                .replace("@ORIGIN@", self._origin(request)).replace("@KEY@", self.contribute_key))
+        return web.Response(text=text, content_type="text/plain")
+
+    async def _package(self, request: web.Request) -> web.Response:
+        """This EdgeMesh version as a pip-installable zip, for the installers."""
+        if not self._may_contribute(request):
+            raise web.HTTPUnauthorized(text="wrong key")
+        return web.Response(body=await asyncio.to_thread(_package_zip), content_type="application/zip")
+
+    async def _models(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        from .hf import downloaded
+
+        current = self.orchestrator.cfg.get("name") if self.orchestrator else None
+        models = await asyncio.to_thread(downloaded, self.loader.cache)
+        return web.json_response({"current": current, "models": [{**m, "loaded": m["repo"] == current} for m in models]})
+
+    async def _delete_model(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        from .hf import remove
+
+        repo = request.query.get("repo", "")
+        if self.orchestrator is not None and self.orchestrator.cfg.get("name") == repo:
+            raise web.HTTPConflict(text="that model is in use; load another one first")
+        d = self.loader.current
+        if d is not None and d.repo == repo and d.state in ("starting", "downloading", "loading"):
+            raise web.HTTPConflict(text="that model is still downloading")
+        try:
+            freed = await asyncio.to_thread(remove, self.loader.cache, repo)
+        except FileNotFoundError as e:
+            raise web.HTTPNotFound(text=str(e))
+        log.info("removed %s (%.1f GB)", repo, freed / 2**30)
+        return web.json_response({"freed": freed})
+
+    async def _chat_get(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        return web.json_response({"version": self.chat_version, "messages": self.chat})
+
+    async def _chat_clear(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        self.chat = []
+        self.chat_version += 1
+        return web.json_response({"version": self.chat_version})
+
     async def _static(self, request: web.Request) -> web.Response:
         name = request.match_info["name"]
-        if name not in ("app.js", "worker.js", "model.js", "style.css"):
+        types = {"app.js": "application/javascript", "worker.js": "application/javascript",
+                 "common.js": "application/javascript", "contribute.js": "application/javascript",
+                 "gpu.js": "application/javascript",
+                 "model.js": "application/javascript", "pool.js": "application/javascript", "style.css": "text/css",
+                 "icon.svg": "image/svg+xml", "manifest.webmanifest": "application/manifest+json"}
+        if name not in types:
             raise web.HTTPNotFound()
-        ctype = "text/css" if name.endswith(".css") else "application/javascript"
-        return web.Response(text=_web_file(name), content_type=ctype)
+        return web.Response(text=_web_file(name), content_type=types[name])
+
+    async def _qr(self, request: web.Request) -> web.Response:
+        """QR code (SVG) for the join link, so phones can scan it from the hub's screen."""
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        import io
+
+        import segno
+
+        buf = io.BytesIO()
+        segno.make(request.query.get("url", ""), error="m").save(buf, kind="svg", scale=6, border=2,
+                                                               dark="#111", light="#fff")
+        return web.Response(body=buf.getvalue(), content_type="image/svg+xml")
+
+    async def _estimate(self, request: web.Request) -> web.Response:
+        """GET ?repo=org/name (or nothing for the current model) -> speed / memory / disk estimate."""
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        from .estimate import estimate
+
+        repo = request.query.get("repo", "").strip().removeprefix("https://huggingface.co/").strip("/")
+        if repo:
+            from .hf import remote_config
+
+            try:
+                cfg, disk = await asyncio.to_thread(remote_config, repo, request.query.get("token") or self.loader.token)
+            except (ValueError, PermissionError, FileNotFoundError) as e:
+                return web.json_response({"problem": str(e)})
+            except Exception as e:
+                return web.json_response({"problem": f"could not reach Hugging Face: {e}"})
+        elif self.orchestrator is not None:
+            cfg = self.orchestrator.cfg
+            folder = getattr(self.orchestrator.source, "folder", None)
+            disk = sum(f.stat().st_size for f in folder.iterdir() if f.is_file()) if folder else None
+        else:
+            raise web.HTTPNotFound(text="no model loaded")
+        workers = [{"node_id": c.node_id, **c.info, "direct": c.info.get("direct", c.native)} for c in self.clients.values()]
+        return web.json_response(estimate(cfg, workers, disk))
+
+    async def _set_limits(self, request: web.Request) -> web.Response:
+        """POST {"cpu", "schedule"} -> forwarded to the device, which stores and applies it."""
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        from .limits import validate
+
+        node = request.match_info["node"]
+        if node not in self.clients:
+            raise web.HTTPNotFound(text="device not connected")
+        try:
+            limits = validate(await request.json())
+            rh, _ = await self.endpoint.request(node, {"op": "set_limits", "limits": limits}, timeout=15)
+        except (ValueError, KeyError) as e:
+            raise web.HTTPBadRequest(text=str(e))
+        except (RuntimeError, asyncio.TimeoutError) as e:
+            raise web.HTTPBadGateway(text=f"device did not accept the limits: {e}")
+        return web.json_response(rh.get("limits", limits))
+
+    async def _remove_device(self, request: web.Request) -> web.Response:
+        """Take a device off the mesh: it stops, removes its autostart and, if the one-line
+        installer set it up, uninstalls EdgeMesh. Browsers forget the link."""
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        node = request.match_info["node"]
+        client = self.clients.get(node)
+        if client is None:
+            raise web.HTTPNotFound(text="device not connected")
+        if client.info.get("hub_machine"):
+            raise web.HTTPBadRequest(text="that's the main computer itself; stop it there")
+        self.removed.add(node)
+        try:
+            rh, _ = await self.endpoint.request(node, {"op": "uninstall"}, timeout=10)
+        except (RuntimeError, asyncio.TimeoutError) as e:
+            rh = {"ok": False, "error": str(e)}
+        await client.ws.close()
+        log.info("removed %s from the mesh: %s", node, rh)
+        return web.json_response(rh)
 
     async def _status(self, request: web.Request) -> web.Response:
         if not self._authorized(request):
@@ -252,15 +453,27 @@ class Hub:
         return web.json_response({
             "model": o.cfg if o else None,
             "lan_origin": self.lan_origin,
+            "public_origin": self.public_origin,
+            "contribute_key": self.contribute_key,
+            "chat_version": self.chat_version,
+            "capacity": _capacity([c.info for c in self.clients.values()]),
             "plan": [list(p) for p in o.plan] if o else [],
+            "busy": bool(o and o._lock.locked()),
+            "last_run": o.last_run if o else None,
             "devices": [{"node_id": c.node_id, "kind": c.info.get("kind"), "role": c.info.get("role"),
                          "platform": c.info.get("platform"), "score": c.info.get("score"),
-                         "mem_mb": c.info.get("mem_mb"), "public_udp": c.udp_addr}
+                         "mem_mb": c.info.get("mem_mb"), "public_udp": c.udp_addr, "direct": c.info.get("direct"),
+                         "limit": c.info.get("limit", 100), "limit_reason": c.info.get("limit_reason"),
+                         "limits": c.info.get("limits"), "is_hub_machine": c.info.get("hub_machine", False),
+                         "contributor": c.contributor, "rtt_ms": c.info.get("rtt_ms"), "cores": c.info.get("cores"),
+                         "power": c.info.get("power"), "uses": c.info.get("uses"), "gpu": c.info.get("gpu"),
+                         "helped": o.helped.get(c.node_id) if o else None}
                         for c in self.clients.values()],
         })
 
     async def _generate(self, request: web.Request) -> web.StreamResponse:
-        """POST {"prompt", "max_new", "temperature"} -> newline-delimited JSON events."""
+        """POST {"prompt" or "messages", "max_new", "temperature", "chat"} -> newline-delimited JSON events.
+        Closing the request (the Stop button) ends the generation."""
         if not self._authorized(request):
             raise web.HTTPUnauthorized(text="wrong mesh key")
         if self.orchestrator is None:
@@ -268,11 +481,36 @@ class Hub:
         body = await request.json()
         resp = web.StreamResponse(headers={"Content-Type": "application/x-ndjson", "Cache-Control": "no-cache"})
         await resp.prepare(request)
+        record = body.get("record")  # {"user": text, "by": device}: add to the shared conversation
+        reply = None
+        if isinstance(record, dict):
+            self.chat.append({"role": "user", "content": str(record.get("user", "")), "by": str(record.get("by", ""))[:64]})
+            reply = {"role": "assistant", "content": "", "model": self.orchestrator.cfg.get("name"), "live": True}
+            self.chat.append(reply)
+            self.chat = self.chat[-200:]
+            self.chat_version += 1
         try:
-            async for ev in self.orchestrator.generate(str(body.get("prompt", "")), int(body.get("max_new", 32)),
-                                                       float(body.get("temperature", 0.0)), body.get("seed"),
-                                                       bool(body.get("chat", False))):
-                await resp.write((json.dumps(ev) + "\n").encode())
+            messages = body.get("messages")
+            prompt = messages if isinstance(messages, list) else str(body.get("prompt", ""))
+            gen = self.orchestrator.generate(prompt, int(body.get("max_new", 32)), float(body.get("temperature", 0.0)),
+                                             body.get("seed"), bool(body.get("chat", False)), body.get("context"))
+            try:
+                async for ev in gen:
+                    if reply is not None and ev["type"] in ("token", "done"):
+                        reply["content"] = ev["text"]
+                        self.chat_version += 1
+                        if ev["type"] == "done":
+                            reply.pop("live", None)
+                            reply["stats"] = ev["stats"]
+                    await resp.write((json.dumps(ev) + "\n").encode())
+            finally:
+                await gen.aclose()
+                if reply is not None and reply.pop("live", None):
+                    reply["stopped"] = True
+                    self.chat_version += 1
+        except ConnectionResetError:
+            log.info("client stopped the generation")
+            return resp
         except Exception as e:
             log.warning("generation failed: %s", e)
             await resp.write((json.dumps({"type": "error", "error": str(e)}) + "\n").encode())
@@ -331,6 +569,43 @@ def _candidates(c: _Client) -> list:
         if list(addr) not in out:
             out.append(list(addr))
     return out
+
+
+def _capacity(infos: list[dict]) -> dict:
+    """The biggest model the connected devices can hold, and how big a model they can run at a
+    given speed (generation reads every weight once per token: ~2 FLOPs per parameter)."""
+    workers = [i for i in infos if i.get("role") == "worker" and i.get("limit", 100) > 0]
+    mem = sum(i.get("mem_mb", 0) * 2**20 / (2 if i.get("uses") == "gpu" else 4) for i in workers)
+    flops = sum(i.get("score", 0) * i.get("limit", 100) / 100 for i in workers) * 1e9
+    speed = lambda tps: int(min(mem, flops / (2 * tps))) if flops else 0
+    return {"max_params": int(mem), "params_at_10": speed(10), "params_at_5": speed(5), "params_at_1": speed(1),
+            "gflops": round(flops / 1e9, 1), "devices": len(workers)}
+
+
+def _package_zip() -> bytes:
+    """Zip of the installed edgemesh package plus a pyproject.toml, installable with pip."""
+    import io
+    import zipfile
+    from importlib import metadata
+
+    root = Path(__file__).resolve().parent
+    try:
+        reqs = [r for r in metadata.requires("edgemesh") or [] if "extra ==" not in r]
+        version = metadata.version("edgemesh")
+    except metadata.PackageNotFoundError:
+        reqs, version = ["numpy", "cryptography", "aiohttp", "tokenizers", "jinja2", "segno", "threadpoolctl"], "0.0.0"
+    pyproject = (f'[project]\nname = "edgemesh"\nversion = "{version}"\nrequires-python = ">=3.10"\n'
+                 f'dependencies = {json.dumps(reqs)}\n\n[project.scripts]\nedgemesh = "edgemesh.cli:main"\n\n'
+                 '[build-system]\nrequires = ["setuptools>=61"]\nbuild-backend = "setuptools.build_meta"\n\n'
+                 '[tool.setuptools]\npackages = ["edgemesh"]\n\n[tool.setuptools.package-data]\n'
+                 'edgemesh = ["web/*", "installers/*"]\n')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("edgemesh-src/pyproject.toml", pyproject)
+        for f in root.rglob("*"):
+            if f.is_file() and "__pycache__" not in f.parts and f.suffix != ".pyc":
+                z.write(f, "edgemesh-src/edgemesh/" + f.relative_to(root).as_posix())
+    return buf.getvalue()
 
 
 def _web_file(name: str) -> str:

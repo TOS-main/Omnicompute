@@ -1,9 +1,12 @@
 import asyncio
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from edgemesh.hub import Hub
+from edgemesh.limits import LimitStore
 from edgemesh.model import Shard, random_model, save_model
 from edgemesh.node import MeshNode
 from edgemesh.worker import Worker
@@ -27,7 +30,8 @@ async def start_mesh(model_path, workers):
         n = MeshNode(name, KEY, f"http://127.0.0.1:{hub.port}",
                      {"role": "worker", "kind": "native", "score": score, "mem_mb": 1024},
                      allow_direct=not relay_only)
-        Worker().attach(n)
+        # full speed, and always in the split (the planner would otherwise use just one fast device)
+        Worker(LimitStore(Path(tempfile.mkdtemp()) / "limits.json", {"cpu": 100, "always": True})).attach(n)
         await n.start()
         nodes.append(n)
     return hub, nodes
@@ -53,7 +57,8 @@ async def collect(hub, prompt, n):
 
 async def test_generation_across_devices_matches_single_device(model_file):
     path, cfg, w = model_file
-    hub, nodes = await start_mesh(path, [("a", False, 3), ("b", False, 2), ("c", True, 1)])
+    # the fastest device goes last (it also computes the output head): chain a -> b -> c
+    hub, nodes = await start_mesh(path, [("a", False, 2), ("b", False, 1), ("c", True, 3)])
     try:
         events, ids = await collect(hub, "hello mesh", 12)
         assert ids == reference(cfg, w, "hello mesh", 12)

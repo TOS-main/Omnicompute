@@ -28,10 +28,11 @@ from urllib.parse import urlsplit
 import aiohttp
 from cryptography.exceptions import InvalidTag
 
-from .crypto import MeshCipher
+from .crypto import MeshCipher, contribute_key, is_contribute_key
 from .hub import OBSERVE_REQ, OBSERVE_RESP
 from .messenger import Messenger
 from .protocol import pack, unpack
+from .wsparts import Joiner, split
 
 log = logging.getLogger("edgemesh.node")
 
@@ -182,10 +183,11 @@ class _UDP(asyncio.DatagramProtocol):
 
 
 def parse_join_url(url: str) -> tuple[str, str]:
-    """'http://1.2.3.4:8000/?k=SECRET' -> ('http://1.2.3.4:8000', 'SECRET')."""
+    """'http://1.2.3.4:8000/?k=SECRET' -> ('http://1.2.3.4:8000', 'SECRET').
+    A contribute-only link ('.../contribute?c=KEY') gives its contribute key instead."""
     parts = urlsplit(url if "://" in url else "http://" + url)
-    key = dict(q.split("=", 1) for q in parts.query.split("&") if "=" in q).get("k", "")
-    return f"{parts.scheme}://{parts.netloc}", key
+    q = dict(q.split("=", 1) for q in parts.query.split("&") if "=" in q)
+    return f"{parts.scheme}://{parts.netloc}", q.get("k") or q.get("c", "")
 
 
 class MeshNode(Messenger):
@@ -195,7 +197,9 @@ class MeshNode(Messenger):
                  allow_direct: bool = True, udp_port: int = 0, handler=None):
         super().__init__(handler)
         self.node_id = node_id
-        self.cipher = MeshCipher(secret)
+        self.cipher = MeshCipher(contribute_key(secret))  # seals device-to-device traffic
+        self.auth = MeshCipher(secret)  # proves which key we hold when logging in
+        self.contributor = is_contribute_key(secret)
         self.hub_url = hub_url.rstrip("/")
         self.info = {**(info or {}), "direct": allow_direct}
         self.allow_direct = allow_direct
@@ -205,6 +209,7 @@ class MeshNode(Messenger):
         self._server_waiters: dict[str, asyncio.Future] = {}
         self._tasks: list[asyncio.Task] = []
         self._observed = asyncio.Event()
+        self._ws_lock = asyncio.Lock()
         self.closed = asyncio.Event()
         self.stats = {"direct": 0, "relay": 0}
 
@@ -221,7 +226,7 @@ class MeshNode(Messenger):
         try:
             self.ws = await self.session.ws_connect(ws_url, max_msg_size=0, heartbeat=20)
             challenge, _ = unpack(await self.ws.receive_bytes(timeout=10))
-            mac = self.cipher.sign(f"{challenge['nonce']}:{self.node_id}".encode())
+            mac = self.auth.sign(f"{challenge['nonce']}:{self.node_id}".encode())
             await self.ws.send_bytes(pack({"node_id": self.node_id, "mac": mac, "info": self.info}))
             welcome, _ = unpack(await self.ws.receive_bytes(timeout=10))
         except Exception:
@@ -292,6 +297,12 @@ class MeshNode(Messenger):
                 p.connecting = asyncio.ensure_future(self._connect(peer_id, p))
             await asyncio.shield(p.connecting)
         return self.path_to(peer_id) == "direct"
+
+    async def update_info(self, fields: dict) -> None:
+        """Change what the hub knows about this device (e.g. its usage limit)."""
+        self.info.update(fields)
+        if getattr(self, "ws", None) is not None and not self.ws.closed:
+            await self._server_send({"type": "info", "info": fields})
 
     def path_to(self, peer_id: str) -> str:
         p = self.peers.get(peer_id)
@@ -419,13 +430,19 @@ class MeshNode(Messenger):
     # ---------- hub connection ----------
 
     async def _server_send(self, header: dict, payload: bytes = b"") -> None:
-        await self.ws.send_bytes(pack(header, payload))
+        async with self._ws_lock:
+            for part in split(pack(header, payload)):
+                await self.ws.send_bytes(part)
 
     async def _server_loop(self) -> None:
+        joiner = Joiner()
         async for msg in self.ws:
             if msg.type != aiohttp.WSMsgType.BINARY:
                 continue
-            header, payload = unpack(msg.data)
+            data = joiner.feed(msg.data)
+            if data is None:
+                continue
+            header, payload = unpack(data)
             kind = header.get("type")
             if kind == "relay":
                 try:

@@ -49,9 +49,9 @@ router cell 10.0.0.4 phone 100.64.0 1
 export PYTHONPATH="$ROOT" EDGEMESH_HOME="$LOGS/home"
 ip netns exec wan $PY -m edgemesh -v host --key $KEY --no-worker --port 8000 >"$LOGS/hub.log" 2>&1 &
 sleep 2
-declare -A SCORE=([laptop]=3 [desktop]=2 [phone]=1)  # fixes the chain order: laptop -> desktop -> phone
+declare -A SCORE=([laptop]=2 [desktop]=1 [phone]=3)  # chain laptop -> desktop -> phone (the fastest goes last)
 for d in laptop desktop phone; do
-  EDGEMESH_SCORE=${SCORE[$d]} ip netns exec $d $PY -m edgemesh -v join "http://10.0.0.1:8000/?k=$KEY" --name $d >"$LOGS/$d.log" 2>&1 &
+  EDGEMESH_SCORE=${SCORE[$d]} ip netns exec $d $PY -m edgemesh -v join "http://10.0.0.1:8000/?k=$KEY" --name $d --always --cpu 100 >"$LOGS/$d.log" 2>&1 &
 done
 sleep 3
 ip netns exec wan $PY -m edgemesh run "http://10.0.0.1:8000/?k=$KEY" "hello from three networks" --max-new 20 \

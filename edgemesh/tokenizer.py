@@ -11,12 +11,15 @@ from datetime import datetime
 from pathlib import Path
 
 
+DEFAULT_SYSTEM = "You are a helpful AI assistant. Answer clearly and concisely."
+
+
 class ByteTokenizer:
     eos_ids: set[int] = set()
     has_chat_template = False
 
-    def encode(self, text: str, chat: bool = False) -> list[int]:
-        return list(text.encode("utf-8"))
+    def encode(self, text, chat: bool = False) -> list[int]:
+        return list(_flatten(text).encode("utf-8"))
 
     def decode(self, ids: list[int]) -> str:
         return bytes(i % 256 for i in ids).decode("utf-8", errors="replace")
@@ -62,14 +65,24 @@ class HFTokenizer:
         return env.from_string(self.template).render(messages=messages, add_generation_prompt=True,
                                                      bos_token=self.bos, eos_token=self.eos)
 
-    def encode(self, text: str, chat: bool = False) -> list[int]:
+    def encode(self, text, chat: bool = False) -> list[int]:
+        """text: a prompt string, or a list of {"role", "content"} messages."""
         if chat and self.template:
-            return self.tok.encode(self.apply_chat_template([{"role": "user", "content": text}]),
-                                   add_special_tokens=False).ids
-        return self.tok.encode(text).ids
+            messages = text if isinstance(text, list) else [{"role": "system", "content": DEFAULT_SYSTEM},
+                                                            {"role": "user", "content": text}]
+            return self.tok.encode(self.apply_chat_template(messages), add_special_tokens=False).ids
+        return self.tok.encode(_flatten(text)).ids
 
     def decode(self, ids: list[int]) -> str:
         return self.tok.decode(ids, skip_special_tokens=True)
+
+
+def _flatten(text) -> str:
+    """Chat history as plain text, for models without a chat template."""
+    if isinstance(text, str):
+        return text
+    lines = [f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}" for m in text]
+    return "\n".join(lines) + "\nAssistant:"
 
 
 def _read(p: Path) -> dict:

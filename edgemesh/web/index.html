@@ -2,88 +2,185 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#14161a">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111318">
 <title>EdgeMesh</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header>
-  <h1>EdgeMesh</h1>
-  <p class="sub">One model, split across your phones and computers.</p>
-</header>
+<div id="app">
+  <header id="top">
+    <div class="brand"><img src="/static/icon.svg" alt=""><span>EdgeMesh</span></div>
+    <div id="pill" class="pill">connecting…</div>
+  </header>
 
-<main>
-  <section id="keybox" class="card" hidden>
-    <h2>Enter the mesh key</h2>
-    <p>Open the join link from the hub, or paste its key here.</p>
-    <form id="keyform" class="row">
-      <input id="keyinput" placeholder="mesh key" autocomplete="off">
-      <button>Continue</button>
-    </form>
-  </section>
+  <nav id="tabs" role="tablist">
+    <button data-tab="chat" class="active">Chat</button>
+    <button data-tab="devices">Devices <span id="devcount" class="count"></span></button>
+    <button data-tab="model">Model</button>
+    <button data-tab="connect">Connect</button>
+  </nav>
 
-  <section id="contribute" class="card">
-    <div class="row space">
-      <div>
-        <h2>Use this device</h2>
-        <p id="wstatus" class="muted">Not contributing.</p>
-      </div>
-      <button id="wtoggle" class="primary">Contribute compute</button>
+  <section id="keybox" class="page" hidden>
+    <div class="card narrow">
+      <h2>Enter the mesh key</h2>
+      <p class="muted">Open the join link from the main computer, or paste its key.</p>
+      <form id="keyform" class="row"><input id="keyinput" placeholder="mesh key" autocomplete="off"><button class="primary">Continue</button></form>
     </div>
-    <p class="hint">Keep this page open and the screen on while it works. Phones in your pocket or on another network are fine.</p>
   </section>
 
-  <section class="card">
-    <h2>Model</h2>
-    <p id="modelinfo" class="muted">…</p>
-    <form id="hfform">
-      <label class="block">Load any model from Hugging Face (repo id or link)</label>
-      <div class="row">
-        <input id="hfrepo" placeholder="e.g. Qwen/Qwen2.5-0.5B-Instruct" autocomplete="off" spellcheck="false">
-        <button id="hfload">Load</button>
+  <!-- ================= CHAT ================= -->
+  <section id="page-chat" class="page active">
+    <div class="chat-layout">
+      <div class="chat-main">
+        <div id="demo-banner" class="banner" hidden>
+          You're on the built-in <b>test model</b> (random weights, it can't answer). Load a real one in the <a href="#" data-goto="model">Model</a> tab.
+        </div>
+        <div id="messages" aria-live="polite">
+          <div id="empty" class="empty">
+            <img src="/static/icon.svg" alt="">
+            <h2>Ask anything</h2>
+            <p class="muted">Your prompt runs on every device in the mesh.</p>
+          </div>
+        </div>
+        <div id="live" class="live" hidden>
+          <span id="livestats"></span>
+          <div id="liveload" class="loadrow"></div>
+        </div>
+        <form id="composer">
+          <textarea id="input" rows="1" placeholder="Message the model…  (Enter to send, Shift+Enter for a new line)"></textarea>
+          <button id="send" class="primary" type="submit">Send</button>
+        </form>
+        <div class="ctxbar"><div class="meter"><div id="ctxfill"></div></div><span id="ctxtext" class="muted small"></span></div>
       </div>
-      <div class="chips">
-        <button type="button" class="chip" data-repo="HuggingFaceTB/SmolLM2-360M-Instruct">SmolLM2 360M</button>
-        <button type="button" class="chip" data-repo="Qwen/Qwen2.5-0.5B-Instruct">Qwen2.5 0.5B</button>
-        <button type="button" class="chip" data-repo="TinyLlama/TinyLlama-1.1B-Chat-v1.0">TinyLlama 1.1B</button>
-        <button type="button" class="chip" data-repo="Qwen/Qwen2.5-1.5B-Instruct">Qwen2.5 1.5B</button>
-      </div>
-      <details>
-        <summary>Gated or private model?</summary>
-        <input id="hftoken" type="password" placeholder="Hugging Face token (hf_…)" autocomplete="off">
-      </details>
-    </form>
-    <div id="dl" hidden><div class="bar"><div id="dlbar"></div></div><p id="dltext" class="muted"></p></div>
-    <p class="hint">Works with Llama, Mistral, Qwen, Phi-3, SmolLM, TinyLlama and GPT-2 models and their fine-tunes, as long as the repo has .safetensors files. Only the hub downloads; each device gets just its layers.</p>
-  </section>
 
-  <section class="card">
-    <h2>Run a prompt</h2>
-    <textarea id="prompt" rows="3" placeholder="Type a prompt...">The meaning of life is</textarea>
-    <div class="row">
-      <label>Tokens <input id="maxnew" type="number" value="40" min="1" max="1000"></label>
-      <label>Temperature <input id="temp" type="number" value="0.7" min="0" max="2" step="0.1"></label>
-      <label><input id="chat" type="checkbox"> Chat format</label>
-      <button id="run" class="primary">Run</button>
+      <aside id="settings" class="chat-side">
+        <div class="side-head"><h3>Generation</h3><button id="newchat" class="ghost small">New chat</button></div>
+        <label class="field">System prompt
+          <textarea id="system" rows="3"></textarea>
+        </label>
+        <label class="field">Max new tokens <output id="maxnew-out"></output>
+          <input id="maxnew" type="range" min="16" max="4096" step="16" value="512">
+          <span class="muted small" id="maxnew-hint"></span>
+        </label>
+        <label class="field">Context length <output id="ctx-out"></output>
+          <input id="ctx" type="range" min="256" max="4096" step="256" value="4096">
+          <span class="muted small" id="ctx-hint"></span>
+        </label>
+        <label class="field">Temperature <output id="temp-out"></output>
+          <input id="temp" type="range" min="0" max="2" step="0.05" value="0.7">
+        </label>
+        <label class="switch"><input id="chatfmt" type="checkbox" checked><span></span> Use the model's chat format</label>
+        <label class="switch"><input id="markdown" type="checkbox" checked><span></span> Render Markdown and code</label>
+        <p class="muted small" id="modelline"></p>
+      </aside>
     </div>
-    <pre id="output"></pre>
-    <p id="runstats" class="muted"></p>
   </section>
 
-  <section class="card">
-    <h2>Devices <span id="modelname" class="muted"></span></h2>
-    <ul id="devices"></ul>
+  <!-- ================= DEVICES ================= -->
+  <section id="page-devices" class="page">
+    <div class="card">
+      <div class="row space">
+        <div>
+          <h2>This device</h2>
+          <p id="wstatus" class="muted">Controller only: runs prompts and manages the mesh.</p>
+        </div>
+        <div class="seg" id="mode">
+          <button data-mode="controller" class="active">Controller</button>
+          <button data-mode="worker">Controller + worker</button>
+        </div>
+      </div>
+      <div id="mylimits"></div>
+      <label class="switch small"><input id="bg" type="checkbox"><span></span> Keep working when this tab is in the background</label>
+      <p class="muted small">Phones pause background tabs to save battery. With this on, the page plays a silent tone so it keeps running (Android may still stop it after a long time). Settings are saved on this device.</p>
+    </div>
+    <div class="row space"><h2 class="section">Mesh devices</h2><span id="planline" class="muted small"></span></div>
+    <div id="devices" class="grid"></div>
+    <details class="explain">
+      <summary>What do "direct" and "relay" mean?</summary>
+      <p><b>Direct</b>: the device sends its work straight to the next device (hole-punched UDP). Fastest.</p>
+      <p><b>Relay</b>: its traffic goes through the main computer, which forwards it. It works on any network (school Wi-Fi, cellular), but each token takes a little longer. Browsers (phones, Chromebooks) always use the relay for now.</p>
+      <p><b>Standby</b>: connected, but the mesh is currently faster without it (an extra hop costs more than it saves). Turn on "Always use" to include it anyway.</p>
+    </details>
   </section>
 
-  <section class="card">
-    <h2>Add more devices</h2>
-    <p><b>Phone or tablet:</b> open this link and tap “Contribute compute”.</p>
-    <div class="row"><input id="joinlink" readonly><button id="copy">Copy</button></div>
-    <p><b>Windows, Mac or Linux:</b> open the EdgeMesh app, choose “Join” and paste the link above, or run</p>
-    <pre id="joincmd"></pre>
+  <!-- ================= MODEL ================= -->
+  <section id="page-model" class="page">
+    <div class="card">
+      <h2>Current model</h2>
+      <div id="current"></div>
+    </div>
+    <div class="card">
+      <h2>What your mesh can run</h2>
+      <div id="capacity"></div>
+    </div>
+    <div class="card">
+      <h2>Downloaded models</h2>
+      <div id="downloaded"></div>
+    </div>
+    <div class="card">
+      <h2>Load from Hugging Face</h2>
+      <form id="hfform">
+        <div class="row">
+          <input id="hfrepo" placeholder="org/model, e.g. Qwen/Qwen2.5-1.5B-Instruct" autocomplete="off" spellcheck="false">
+          <button type="button" id="hfest">Estimate</button>
+          <button id="hfload" class="primary">Load</button>
+        </div>
+        <div class="chips" id="chips"></div>
+        <details><summary>Gated or private model?</summary>
+          <input id="hftoken" type="password" placeholder="Hugging Face token (hf_…)" autocomplete="off">
+        </details>
+      </form>
+      <div id="estimate"></div>
+      <div id="dl" hidden><div class="meter big"><div id="dlbar"></div></div><p id="dltext" class="muted"></p></div>
+      <p class="muted small">Works with Llama, Mistral, Qwen, Phi-3, SmolLM, TinyLlama and GPT-2 models and their fine-tunes (repos with .safetensors). Only the main computer downloads; each device receives just its layers.</p>
+    </div>
   </section>
-</main>
+
+  <!-- ================= CONNECT ================= -->
+  <section id="page-connect" class="page">
+    <div class="connect">
+      <div class="card qrcard">
+        <h2>Scan to join</h2>
+        <div class="seg" id="linkkind">
+          <button data-kind="full" class="active">Full access</button>
+          <button data-kind="contribute">Contribute only</button>
+        </div>
+        <p id="linkhelp" class="muted small"></p>
+        <img id="qr" alt="QR code for the join link">
+        <div class="row"><input id="joinlink" readonly><button data-copyfrom="joinlink" type="button">Copy</button></div>
+      </div>
+      <div class="card">
+        <h2>Add devices</h2>
+        <h3>Phone, tablet or Chromebook</h3>
+        <p>Scan the code or open the link, go to <b>Devices</b> and pick <b>Controller + worker</b>. Use your browser's "Add to Home screen" to get an app icon.</p>
+        <h3>Windows, Mac or Linux in one line</h3>
+        <p>Paste this on the other computer. It says what it will do and asks first, then installs EdgeMesh from this main computer and contributes in the background with no window, starting again whenever someone signs in. It still shows in Task Manager, and <b>Remove</b> on the Devices tab (or <code>edgemesh contribute --uninstall</code> on that computer) uninstalls it. Only use it on computers you own or are allowed to use.</p>
+        <p class="small"><b>Windows</b> (PowerShell)</p>
+        <div class="cmd"><pre id="ps1"></pre><button class="small" data-copyfrom="ps1" type="button">Copy</button></div>
+        <p class="small"><b>Mac or Linux</b> (Terminal)</p>
+        <div class="cmd"><pre id="sh1"></pre><button class="small" data-copyfrom="sh1" type="button">Copy</button></div>
+        <p class="muted small">Or unzip EdgeMesh, run <code>start-windows.bat</code> (or <code>sh start-mac-linux.sh</code>), choose <b>Join</b> and paste the link, or run:</p>
+        <pre id="joincmd"></pre>
+        <h3>On another network or cellular</h3>
+        <p>Start the main computer with <code>edgemesh host --public</code> (or answer "yes" to the question in the launcher). It prints an <b>https</b> link and QR code that work from any network, with no router setup. This page then shows that link. https also turns on the GPU in phone and Chromebook browsers.</p>
+        <details class="explain"><summary>Other ways besides Cloudflare</summary>
+          <p><b>Tailscale</b> (free, recommended for your own devices): install it on the main computer and each device, sign in with the same account, and they share a private network that works across Wi-Fi, school and cellular. Use the main computer's Tailscale address (100.x.y.z) in the link. Devices even connect directly, so it's faster than a tunnel. Tailscale Funnel can also give a public https address.</p>
+          <p><b>ngrok</b>: <code>ngrok http <span class="portv"></span></code> gives an https address, similar to Cloudflare. Free accounts get one fixed address.</p>
+          <p><b>ZeroTier</b>: like Tailscale, a private network between your devices.</p>
+          <p><b>Port forwarding</b>: forward TCP and UDP port <span id="port"></span> on your home router to the main computer and share <code>http://&lt;your-public-ip&gt;:<span id="port2"></span>/?k=…</code>. Fastest, but some internet providers (and all cellular networks) don't allow it.</p>
+          <p><b>A cloud server</b> (a small VPS): run <code>edgemesh host --no-worker</code> there so every device can always reach it.</p>
+          <p class="muted small">For any of these, start the main computer with <code>edgemesh host --public-url https://your-address</code> so this page shows the right link. School networks can block some of them; Cloudflare and ngrok look like normal web traffic, so they get through most often.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+</div>
+<script src="/static/common.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
