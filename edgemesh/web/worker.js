@@ -82,8 +82,9 @@ class Pool {
 
 let pool = null, cpuPool = null, gpuPool = null, cpuScore = 0, gpuScore = 0;
 
-// GPU on, allowed by the limits, and faster than the CPU cores
-const wantGpu = () => !!gpuPool && !gpuPool.lost && !gpuBroken && limits.gpu !== false && (gpuScore > cpuScore || (cfgStart && cfgStart.forceGpu));
+// GPU on, allowed by the limits, and faster than the CPU cores (or the CPU is switched off)
+const wantGpu = () => !!gpuPool && !gpuPool.lost && !gpuBroken && limits.gpu !== false
+  && (limits.use_cpu === false || gpuScore > cpuScore || (cfgStart && cfgStart.forceGpu));
 
 // Move a shard's big matrices onto the pool (GPU or CPU cores); the main copy is dropped to save memory.
 // GPUs and drivers differ; after uploading a matrix, multiply a test vector on both the GPU and

@@ -536,3 +536,44 @@ def test_browser_and_native_gpu_shaders_are_the_same():
         import pytest
         pytest.skip("node is not installed")
     assert json.loads(out.stdout) == [[gpu._shader_f16(t), gpu._shader_q8(t)] for t in (1, 4)]
+
+
+def test_cpu_and_gpu_split_each_matrix(monkeypatch):
+    """With both engines on, the CPU computes its share of each matrix's columns alongside the GPU."""
+    pytest.importorskip("torch")
+    from types import SimpleNamespace
+
+    from edgemesh import limits as L
+    from edgemesh.gpu import open_gpu
+    from edgemesh.worker import Worker
+
+    monkeypatch.setenv("EDGEMESH_GPU", "torch-cpu")
+    gpu = open_gpu()
+    for kw in [dict(arch="gpt2"), dict(arch="llama", n_kv_head=2, tie=True)]:
+        cfg, w = random_model(n_layer=2, n_embd=256, **kw)
+        w16 = {k: v.astype(np.float16).astype(np.float32) for k, v in w.items()}
+        cpu = Shard(cfg, dict(w16), 0, 2)
+        gpu.clear()
+        g = Shard(cfg, dict(w16), 0, 2)
+        g.use_gpu(gpu, cpu_share=0.4)
+        assert g.cpu_part and all(m.shape[1] % 32 == 0 for m in g.cpu_part.values())
+        ids = np.array([3, 1, 4], np.int32)
+        np.testing.assert_allclose(g.forward("j", ids, 0), cpu.forward("j", ids, 0), atol=1e-4)
+        np.testing.assert_allclose(g.forward("j", np.array([5], np.int32), 3),
+                                   cpu.forward("j", np.array([5], np.int32), 3), atol=1e-4)
+
+    monkeypatch.delenv("EDGEMESH_GPU")
+    info = {"cpu_score": 30.0, "cores_total": 8, "gpu": {"score": 70.0}}
+    wk = Worker(gpu=gpu)
+    wk.node = SimpleNamespace(info=info)
+    store = SimpleNamespace(limits=L.validate({"cpu": 100}))
+    wk.limits = store
+    assert wk.engines() == ("both", 0.3) and wk.limit_info()["uses"] == "gpu+cpu"
+    store.limits = L.validate({"cpu": 100, "use_cpu": False})
+    assert wk.engines() == ("gpu", 0.0)
+    store.limits = L.validate({"cpu": 100, "gpu": False})
+    assert wk.engines() == ("cpu", 1.0)
+    store.limits = L.validate({"cpu": 100, "gpu": False, "use_cpu": False})  # never both off
+    assert store.limits["use_cpu"] and wk.engines() == ("cpu", 1.0)
+    store.limits = L.validate({"cpu": 10, "gpu_limit": 100})  # a small CPU share isn't worth splitting
+    assert wk.engines() == ("gpu", 0.0)

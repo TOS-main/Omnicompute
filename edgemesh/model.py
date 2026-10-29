@@ -202,21 +202,46 @@ class Shard:
         self.inv_freq = rope_inv_freq(cfg) if self.llama else None
         self.caches: OrderedDict[str, dict] = OrderedDict()
         self.gpu = None  # optional gpu.GPU holding the weight matrices (see use_gpu)
+        self.cpu_part: dict[str, np.ndarray] = {}  # columns the CPU computes alongside the GPU
+        self.cpu_share, self._pool = 0.0, None
 
-    def use_gpu(self, gpu) -> None:
-        """Move every weight matrix (and a tied output head) to the GPU, freeing the CPU copies."""
-        for name in [n for n, t in self.w.items() if t.ndim == 2 and (n.endswith(".w") or n == "lm_head")]:
-            gpu.put(name, self.w.pop(name))
+    def use_gpu(self, gpu, cpu_share: float = 0.0) -> None:
+        """Move every weight matrix (and a tied output head) to the GPU, freeing the CPU copies.
+        cpu_share > 0 keeps that share of each matrix's columns on the CPU, which computes them
+        while the GPU does the rest (both at once, so a step takes the slower of the two)."""
+        names = [n for n, t in self.w.items() if t.ndim == 2 and (n.endswith(".w") or n == "lm_head")]
         tied = None if "lm_head" in self.w or not self.last else "embed" if self.llama else "wte"
-        if tied:
-            gpu.put(tied + "^T", self.w[tied].T)
+        mats = [(n, lambda n=n: self.w.pop(n)) for n in names] + ([(tied + "^T", lambda: self.w[tied].T)] if tied else [])
+        self.cpu_part = {}
+        for name, take in mats:
+            w = take()
+            n_cpu = int(w.shape[1] * cpu_share) // 32 * 32
+            if n_cpu:
+                self.cpu_part[name] = np.ascontiguousarray(_f32(w[:, :n_cpu]))
+                w = w[:, n_cpu:]
+            gpu.put(name, np.ascontiguousarray(w))
+        self.cpu_share = cpu_share if self.cpu_part else 0.0
+        if self.cpu_part and self._pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._pool = ThreadPoolExecutor(1, thread_name_prefix="edgemesh-cpu-part")
         self.gpu = gpu
+
+    def _gpu_mm(self, x: np.ndarray, names: list[str]) -> list[np.ndarray]:
+        """x @ W on the GPU, with the CPU computing its columns at the same time (see use_gpu)."""
+        part = [n for n in names if n in self.cpu_part]
+        if not part:
+            return self.gpu.mm_many(x, names)
+        fut = self._pool.submit(lambda: [x @ self.cpu_part[n] for n in part])
+        ys = self.gpu.mm_many(x, names)
+        left = dict(zip(part, fut.result()))
+        return [np.concatenate([left[n], y], axis=1) if n in left else y for n, y in zip(names, ys)]
 
     def _mms(self, x: np.ndarray, names: list[str]) -> list[np.ndarray]:
         """[x @ W + b for each weight name], on the GPU when the weights are there."""
         w = self.w
         if self.gpu is not None and all(self.gpu.has(n) for n in names):
-            ys = self.gpu.mm_many(x, names)
+            ys = self._gpu_mm(x, names)
         else:
             ys = [x @ _f32(w[n]) for n in names]
         out = []
@@ -256,7 +281,7 @@ class Shard:
                 tied = "wte"
             name = "lm_head" if self.gpu is not None and self.gpu.has("lm_head") else tied + "^T"
             if self.gpu is not None and self.gpu.has(name):
-                return self.gpu.mm_many(h, [name])[0][0].astype(np.float32)
+                return self._gpu_mm(h, [name])[0][0].astype(np.float32)
             head = w["lm_head"] if "lm_head" in w else w[tied].T
             return (h @ _f32(head))[0].astype(np.float32)
         return x

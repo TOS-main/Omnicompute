@@ -33,7 +33,7 @@ META_FILES = ["config.json", "generation_config.json", "tokenizer.json", "tokeni
 # ---------------------------------------------------------------- config
 
 
-def edgemesh_config(hf: dict, name: str, max_ctx: int = 4096) -> dict:
+def edgemesh_config(hf: dict, name: str, max_ctx: int = 8192) -> dict:
     mt = hf.get("model_type")
     if mt == "gpt2":
         return {"arch": "gpt2", "n_layer": hf["n_layer"], "n_embd": hf["n_embd"], "n_head": hf["n_head"],

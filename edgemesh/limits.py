@@ -16,7 +16,9 @@ battery rules still cap it.
 "awake": true keeps the computer from sleeping while EdgeMesh runs (see awake.py).
 
 "cores" caps how many CPU cores a browser worker uses at once (null = its default);
-"gpu": false keeps a device on its CPU even when it has a usable GPU.
+"gpu": false keeps a device on its CPU even when it has a usable GPU; "use_cpu": false keeps it
+on its GPU only. With both on (the default) a native device splits each matrix between them,
+in proportion to their speed times their limits ("cpu" and "gpu_limit").
 
 "always": true keeps the device in the split even when the planner thinks the mesh
 would be faster without it (by default a device is used only when it helps).
@@ -70,6 +72,7 @@ def _cores(v):
 def validate(limits: dict) -> dict:
     out = {"cpu": _pct(limits.get("cpu", DEFAULT["cpu"])), "schedule": [], "always": bool(limits.get("always", False)),
            "gpu": bool(limits.get("gpu", True)), "cores": _cores(limits.get("cores")),
+           "use_cpu": bool(limits.get("use_cpu", True)) or not bool(limits.get("gpu", True)),  # never both off
            "awake": bool(limits.get("awake", False)),
            "gpu_limit": None if limits.get("gpu_limit") in (None, "") else _pct(limits["gpu_limit"])}
     for w in limits.get("schedule") or []:

@@ -79,6 +79,7 @@ def worker_info(mem_fraction: float = 0.5, gpu=None) -> dict:
 
 
 CONTROL_OPS = {"load", "set_limits", "drop", "preconnect", "info", "credit", "live", "uninstall"}
+HYBRID_MIN = 0.15  # below this share, splitting a matrix between CPU and GPU costs more than it saves
 
 
 class Worker:
@@ -102,24 +103,48 @@ class Worker:
         return self
 
     def use_gpu(self) -> bool:
-        """GPU on, allowed by the limits, and faster than this machine's CPU."""
+        """The GPU computes at least part of each step (see engines)."""
+        return self.engines()[0] != "cpu"
+
+    def engines(self) -> tuple[str, float]:
+        """("cpu" | "gpu" | "both", share of each matrix's columns the CPU computes). With both
+        allowed, the split follows each engine's speed times its usage limit; a tiny share isn't
+        worth the hand-off, so then the faster one does it all."""
         limits = self.limits.limits if self.limits else L.DEFAULT
         info = self.node.info if self.node else {}
-        faster = info.get("gpu", {}).get("score", 0) > info.get("cpu_score", 0)
-        return (self.gpu is not None and not self.gpu_broken and limits.get("gpu", True)
-                and (faster or os.environ.get("EDGEMESH_GPU") == "force"))
+        if self.gpu is None or self.gpu_broken or not limits.get("gpu", True):
+            return "cpu", 1.0
+        if not limits.get("use_cpu", True) or os.environ.get("EDGEMESH_GPU") == "force":
+            return "gpu", 0.0
+        total = info.get("cores_total") or 1
+        cores = L.effective_cores(limits, self.power)
+        cs = info.get("cpu_score", 0) * (min(cores, total) / total if cores else 1) * L.effective(limits, power=self.power)[0]
+        gs = info.get("gpu", {}).get("score", 0) * L.effective_for(limits, True, power=self.power)[0]
+        if cs + gs <= 0:
+            return ("gpu", 0.0) if gs >= cs else ("cpu", 1.0)
+        share = cs / (cs + gs)
+        return ("gpu", 0.0) if share < HYBRID_MIN else ("cpu", 1.0) if share > 1 - HYBRID_MIN else ("both", round(share, 3))
 
     def limit_info(self) -> dict:
         limits = self.limits.limits if self.limits else dict(L.DEFAULT)
-        gpu = self.node is not None and "cpu_score" in self.node.info and self.use_gpu()
-        cpu, why = L.effective_for(limits, gpu, power=self.power)
+        ready = self.node is not None and "cpu_score" in self.node.info
+        mode, _ = self.engines() if ready else ("cpu", 1.0)
+        cpu, why = L.effective_for(limits, mode == "gpu", power=self.power)
+        if mode == "both":  # each engine rests by its own share; the step as a whole by the larger limit
+            g, gwhy = L.effective_for(limits, True, power=self.power)
+            cpu, why = max((cpu, why), (g, gwhy), key=lambda t: t[0])
         out = {"limit": cpu, "limit_reason": why, "limits": limits, "power": self.power,
                "cores": L.effective_cores(limits, self.power)}
-        if self.node is not None and "cpu_score" in self.node.info:
-            out["uses"] = "gpu" if gpu else "cpu"
+        if ready:
+            out["uses"] = {"gpu": "gpu", "cpu": "cpu", "both": "gpu+cpu"}[mode]
             total = self.node.info.get("cores_total") or 1
             share = min(out["cores"], total) / total if out["cores"] else 1  # fewer cores, less speed
-            out["score"] = self.node.info["gpu"]["score"] if gpu else round(self.node.info["cpu_score"] * share, 2)
+            cs, gs = self.node.info["cpu_score"] * share, self.node.info.get("gpu", {}).get("score", 0)
+            if mode == "both":  # speed at this limit, as the planner scales score by it
+                c, g = L.effective(limits, power=self.power)[0], L.effective_for(limits, True, power=self.power)[0]
+                out["score"] = round((cs * c + gs * g) / max(1, cpu), 2)
+            else:
+                out["score"] = gs if mode == "gpu" else round(cs, 2)
         return out
 
     async def report_limits(self, force: bool = False) -> None:
@@ -195,7 +220,8 @@ class Worker:
         if self.gpu is not None:
             self.gpu.clear()
         t = decode_tensors(payload)
-        gpu = self.use_gpu()
+        mode, cpu_share = self.engines()
+        gpu = mode != "cpu"
 
         def on_cpu(t):  # weights travel as float16; expand once so every step runs on fast float32 BLAS
             t = {k: v.astype(np.float32) if v.dtype == np.float16 else v for k, v in t.items()}
@@ -204,7 +230,7 @@ class Worker:
         if gpu:
             shard = Shard(header["cfg"], dict(t), header["start"], header["end"])
             try:
-                await asyncio.to_thread(shard.use_gpu, self.gpu)
+                await asyncio.to_thread(shard.use_gpu, self.gpu, cpu_share if mode == "both" else 0.0)
             except GPUMismatch as e:  # a GPU driver that computes wrong answers: never use it again
                 log.warning("the GPU gave wrong results (%s); using the CPU instead", e)
                 self.gpu_broken = True
@@ -216,7 +242,7 @@ class Worker:
             shard = on_cpu(t)
         self.shards = {header["model"]: shard}
         log.info("loaded %s layers %d-%d on the %s", header["model"], header["start"], header["end"],
-                 f"GPU ({self.gpu.name})" if gpu else "CPU")
+                 (f"GPU ({self.gpu.name})" + (f" and CPU ({cpu_share:.0%} of the work)" if shard.cpu_share else "")) if gpu else "CPU")
         return {"ok": True}, b""
 
     async def _forward(self, h: dict, payload: bytes) -> None:

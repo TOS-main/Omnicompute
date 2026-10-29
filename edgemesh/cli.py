@@ -357,6 +357,8 @@ def cmd_limits(args) -> None:
         change["cores"] = None if args.cores.lower() == "all" else int(args.cores)
     if args.awake is not None:
         change["awake"] = args.awake == "on"
+    if args.use is not None:
+        change["use_cpu"], change["gpu"] = args.use in ("cpu", "both"), args.use in ("gpu", "both")
     for f in files:
         store = L.LimitStore(f)
         if change:
@@ -366,7 +368,8 @@ def cmd_limits(args) -> None:
                 sys.exit(str(e))
         lim = store.limits
         gpu = "same as CPU" if lim.get("gpu_limit") is None else f"{lim['gpu_limit']}%"
-        print(f"{f.stem[len('limits-'):]}: CPU {lim['cpu']}%, GPU {gpu}, cores {lim.get('cores') or f'all {os.cpu_count()}'}, "
+        use = "CPU and GPU" if lim.get("gpu", True) and lim.get("use_cpu", True) else "GPU only" if lim.get("gpu", True) else "CPU only"
+        print(f"{f.stem[len('limits-'):]}: uses {use}, CPU {lim['cpu']}%, GPU {gpu}, cores {lim.get('cores') or f'all {os.cpu_count()}'}, "
               f"keep awake {'on' if lim.get('awake') else 'off'}")
     if change:
         print("Applied; a running EdgeMesh picks it up within a few seconds.")
@@ -641,6 +644,7 @@ def parser() -> argparse.ArgumentParser:
     li.add_argument("--gpu", help='GPU usage limit in percent, or "same" to follow the CPU limit')
     li.add_argument("--cores", help='CPU cores to use, or "all"')
     li.add_argument("--awake", choices=["on", "off"], help="keep this computer from sleeping while it contributes")
+    li.add_argument("--use", choices=["cpu", "gpu", "both"], help="compute on the CPU, the GPU, or both at once")
 
     lk = sub.add_parser("links", help="show this computer's mesh key and join links")
     lk.add_argument("--key", help=argparse.SUPPRESS)

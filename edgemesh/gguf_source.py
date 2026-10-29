@@ -32,7 +32,7 @@ def _unpermute(w: np.ndarray, n_head: int) -> np.ndarray:
     return w.reshape(n_head, shape[0] // n_head // 2, 2, *shape[1:]).swapaxes(1, 2).reshape(shape)
 
 
-def gguf_config(reader, name: str, max_ctx: int = 4096) -> dict:
+def gguf_config(reader, name: str, max_ctx: int = 8192) -> dict:
     arch = _field(reader, "general.architecture")
     if arch not in ARCHS:
         raise ValueError(f"GGUF architecture '{arch}' is not supported yet (supported: {', '.join(sorted(ARCHS))})")

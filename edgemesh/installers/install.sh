@@ -123,6 +123,6 @@ fi
 echo
 echo "Done. This computer now shows up in the main device's Devices tab, from any network."
 echo "Usage limit is 80% by default; change it and the cores there. On this computer:"
-echo "  change:     $DIR/venv/bin/edgemesh limits --cpu 50 --gpu 80 --cores 4 --awake on"
+echo "  change:     $DIR/venv/bin/edgemesh limits --use both --cpu 50 --gpu 80 --cores 4 --awake on"
 echo "  pause:      $DIR/venv/bin/edgemesh contribute --stop"
 echo "  uninstall:  $DIR/venv/bin/edgemesh contribute --uninstall"

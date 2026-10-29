@@ -285,6 +285,8 @@ class Hub:
             await self.route(client.node_id, dst, blob)
         elif kind == "info":  # a device's limits or status changed
             fields = header.get("info") or {}
+            if "uses" in fields and client.info.get("uses") not in (None, fields["uses"]) and self.orchestrator is not None:
+                self.orchestrator.loaded.pop(client.node_id, None)  # CPU/GPU switched: send its layers again
             client.info.update({k: v for k, v in fields.items() if k in INFO_FIELDS})
         elif kind == "list":
             peers = [{"node_id": c.node_id, "info": c.info} for c in self.clients.values() if c is not client]

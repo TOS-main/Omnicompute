@@ -85,7 +85,8 @@ function renderDevices() {
       el("span", { class: "badge" }, d.kind === "browser" ? "browser" : "app"),
       d.kind === "native" && d.direct !== false ? el("span", { class: "badge on", title: "can send directly to other app devices" }, "direct P2P")
         : el("span", { class: "badge relay", title: "traffic goes through the main computer" }, "relay"),
-      d.uses === "gpu" ? el("span", { class: "badge on", title: d.gpu && d.gpu.name }, d.gpu && d.gpu.via === "cuda" ? "GPU · CUDA" : "GPU") : null,
+      d.uses === "gpu" || d.uses === "gpu+cpu" ? el("span", { class: "badge on", title: d.gpu && d.gpu.name },
+        (d.gpu && d.gpu.via === "cuda" ? "GPU · CUDA" : "GPU") + (d.uses === "gpu+cpu" ? " + CPU" : "")) : null,
       d.power ? el("span", { class: "badge" }, d.power === "charging" ? "charging" : "on battery") : null,
       d.contributor ? el("span", { class: "badge", title: "joined with the contribute-only link" }, "contributor") : null,
       d.is_hub_machine ? el("span", { class: "badge" }, "main computer") : null,
@@ -96,14 +97,14 @@ function renderDevices() {
         : el("span", { class: "badge", title: "gets layers when you send a prompt" }, "ready"));
     const load = state.liveLoad[d.node_id], h = d.helped;
     fill(c.stats,
-      stat(d.score != null ? d.score.toFixed(1) : "?", d.uses === "gpu" ? "GFLOP/s (GPU)" : "GFLOP/s"),
+      stat(d.score != null ? d.score.toFixed(1) : "?", d.uses === "gpu" ? "GFLOP/s (GPU)" : d.uses === "gpu+cpu" ? "GFLOP/s (GPU + CPU)" : "GFLOP/s"),
       stat(d.mem_mb ? gb(d.mem_mb * 2 ** 20) : "?", "memory offered"),
       stat(d.rtt_ms != null ? `${Math.round(d.rtt_ms)} ms` : "…", "round trip"),
       stat(d.limit === 0 ? "paused" : `${d.limit}%`, d.limit_reason && d.limit_reason !== "default" ? d.limit_reason : "usage limit"),
       stat(load != null ? `${Math.round(load)}%` : "—", "load (last run)"),
       stat(h ? h.tokens : 0, h ? `tokens · ${h.answers} answers` : "tokens helped"),
       d.cores ? stat(d.cores, "cores") : null,
-      d.gpu && d.uses !== "gpu" ? stat(d.gpu.score.toFixed(1), `GPU GFLOP/s (${d.gpu.name})`.slice(0, 40)) : null);
+      d.gpu && d.uses === "cpu" ? stat(d.gpu.score.toFixed(1), `GPU GFLOP/s (${d.gpu.name})`.slice(0, 40)) : null);
     c.platform.textContent = d.platform || "";
     if (!c.card.contains(document.activeElement) && JSON.stringify(d.limits) !== c.lastLimits) {
       c.lastLimits = JSON.stringify(d.limits);
@@ -260,8 +261,11 @@ document.addEventListener("click", async (e) => {
 // ================================================================ chat
 
 let chat = []; // the shared conversation, kept by the main computer so every controller sees it
-const settings = { system: "You are a helpful AI assistant. Answer clearly and concisely.", maxnew: 512, ctx: null, temp: 0.7, chatfmt: true, markdown: true, ...store.get("settings", {}) };
+const settings = { system: "You are a helpful AI assistant. Answer clearly and concisely.", maxnew: 4096, ctx: null, temp: 0.7, chatfmt: true, markdown: true, ...store.get("settings", {}) };
 
+if ((settings.v || 1) < 2) { // older pages saved 512 new tokens; start again from the new defaults
+  settings.v = 2; settings.defaultsFor = null; settings.ctx = null; settings.maxnew = Math.max(settings.maxnew || 0, 4096);
+}
 function saveSettings() { store.set("settings", settings); }
 
 function bindSetting(id, keyName, fmt, parse = Number) {
@@ -285,6 +289,7 @@ bindSetting("temp", "temp", (v) => (v === 0 ? "0 (greedy)" : v.toFixed(2)));
 bindSetting("chatfmt", "chatfmt", () => "");
 bindSetting("markdown", "markdown", () => "");
 
+const MIN_NEW = 4096;
 function clampMaxNew() {
   const mx = $("maxnew");
   mx.max = Math.max(16, settings.ctx || 4096);
@@ -308,7 +313,7 @@ function applyModel(cfg) {
     if (settings.defaultsFor !== name) { // a new model: start from its own defaults
       const g = cfg.gen_defaults || {};
       settings.defaultsFor = name;
-      settings.maxnew = Math.min(g.max_new_tokens || settings.ctx, settings.ctx);
+      settings.maxnew = Math.min(Math.max(g.max_new_tokens || 0, MIN_NEW), settings.ctx); // at least ~4000 when the context allows
       if (g.temperature != null) settings.temp = g.temperature;
       $("maxnew").value = settings.maxnew; $("maxnew-out").textContent = `${settings.maxnew} tokens`;
       $("temp").value = settings.temp; $("temp-out").textContent = settings.temp === 0 ? "0 (greedy)" : settings.temp.toFixed(2);
@@ -539,6 +544,9 @@ async function refreshModelInfo() {
       e ? estimateView(e, "Expected speed on your current devices") : null);
   }
   const d = m.download, busy = d && ["starting", "downloading", "loading"].includes(d.state);
+  // say it next to the model too: a failed Load keeps the old model running
+  if (d && d.state === "error") cur.prepend(el("p", { class: "bad" }, `Could not load ${d.repo.replace(/^gguf:/, "").split(/[\\/]/).pop()}: ${d.error}.${m.model ? " Still using the model below." : ""}`));
+  else if (busy) cur.prepend(el("p", { class: "muted" }, `Switching to ${d.repo.replace(/^gguf:/, "").split(/[\\/]/).pop()}…`));
   $("dl").hidden = !d || d.state === "ready";
   $("hfload").disabled = !!busy;
   if (d) {

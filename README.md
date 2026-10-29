@@ -32,7 +32,7 @@ The main device prints a **permanent link** (`https://tos-main.github.io/edgemes
 * Windows: `$env:EDGEMESH_CODE="CODE"; irm https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/install.ps1 | iex`
 * Mac / Linux: `curl -fsSL https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/install.sh | EDGEMESH_CODE=CODE sh`
 
-The installer asks how many cores to use, and whether to keep the computer awake while it helps. Change these later with `edgemesh limits --cpu 50 --gpu 80 --cores 4 --awake on`. That command works on a running contributor, and the CPU and GPU each have their own limit.
+The installer asks how many cores to use, and whether to keep the computer awake while it helps. Change these later with `edgemesh limits --use both --cpu 50 --gpu 80 --cores 4 --awake on`. That command works on a running contributor, and the CPU and GPU each have their own limit.
 
 **Help the creator's public mesh:** use `EDGEMESH_CODE=creator`, or run the installer with no code and choose 3. Helpers only compute. Answers are never shown to devices on a contribute link, unless the mesh owner turns that on.
 
