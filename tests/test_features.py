@@ -54,7 +54,7 @@ async def test_contributor_joins_computes_but_gets_no_admin(model_file):
     try:
         assert hub.clients["friend"].contributor and not hub.clients["owner"].contributor
         events, ids = await collect(hub, "hello", 8)
-        assert [p[0] for p in events[0]["plan"]] == ["owner", "friend"]
+        assert [p[0] for p in next(e for e in events if e["type"] == "plan")["plan"]] == ["owner", "friend"]
         assert ids == reference(cfg, w, "hello", 8)
         assert friend.path_to("owner") == "relay"  # helpers never get anyone's IP address
         # each device's part in the answer
@@ -158,7 +158,7 @@ async def test_mesh_with_a_gpu_worker(model_file, monkeypatch):
     try:
         assert hub.clients["gpu-box"].info["uses"] == "gpu"
         events, ids = await collect(hub, "gpu!", 8)
-        assert "gpu-box" in [p[0] for p in events[0]["plan"]]
+        assert "gpu-box" in [p[0] for p in next(e for e in events if e["type"] == "plan")["plan"]]
         assert ids == reference(cfg, w, "gpu!", 8)  # fp16 weights on the GPU, same tokens
         assert next(iter(worker.shards.values())).gpu is gpu
     finally:
@@ -189,7 +189,7 @@ async def test_a_gpu_that_computes_wrong_falls_back_to_the_cpu(model_file, monke
     await n.start()
     try:
         events, ids = await collect(hub, "gpu?", 8)
-        assert "bad-gpu" in [p[0] for p in events[0]["plan"]]
+        assert "bad-gpu" in [p[0] for p in next(e for e in events if e["type"] == "plan")["plan"]]
         assert ids == reference(cfg, w, "gpu?", 8)  # right answer from the CPU
         assert worker.gpu_broken and next(iter(worker.shards.values())).gpu is None
     finally:
@@ -640,3 +640,22 @@ async def test_android_app_helps_a_computers_mesh_from_its_contribute_link(tmp_p
     finally:
         await asyncio.get_running_loop().run_in_executor(None, android.stop)
         await hub.close()
+
+
+def test_uninstall_keeps_a_main_computers_key_and_models(tmp_path, monkeypatch):
+    """`contribute --uninstall` on the main computer removes the program, not its mesh or models."""
+    from omnicompute import background
+
+    install = tmp_path / "install"
+    (install / "venv").mkdir(parents=True)
+    (install / background.MARKER).write_text("x")
+    home = tmp_path / "home"
+    (home / "models" / "gguf").mkdir(parents=True)
+    (home / "mesh.key").write_text("k")
+    monkeypatch.setattr(background.sys, "prefix", str(install / "venv"))
+    monkeypatch.setattr(background, "remove_autostart", lambda: None)
+    monkeypatch.setattr(background.subprocess, "Popen", lambda *a, **k: None)
+    assert background.uninstall(home) == [str(install)]
+    (home / "mesh.key").unlink()
+    (home / "models" / "gguf").rmdir()
+    assert background.uninstall(home) == [str(install), str(home)]  # a helper's folder goes too

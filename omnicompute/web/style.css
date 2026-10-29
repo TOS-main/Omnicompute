@@ -200,3 +200,9 @@ details.more > summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
 .sharerow { margin-bottom: 10px; }
 .sharerow p { margin: 0 0 4px; }
 .sharerow input { flex: 1; min-width: 0; }
+
+.engine-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin: 10px 0; }
+.engine-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; color: var(--muted); }
+.engine-grid label.check { flex-direction: row; align-items: center; }
+.msg.ai details.thinking { margin: 4px 0 6px; padding: 6px 10px; border-left: 3px solid var(--muted); white-space: pre-wrap; }
+.bubble.waiting { color: var(--muted); font-style: italic; }

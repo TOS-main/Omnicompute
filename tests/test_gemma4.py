@@ -211,7 +211,7 @@ async def test_gemma4_across_three_devices_matches_transformers(gemma4):
             await n.start()
             nodes.append(n)
         events = [ev async for ev in hub.orchestrator.generate("Hello world", 10)]
-        assert len(events[0]["plan"]) == 3
+        assert len(next(e for e in events if e["type"] == "plan")["plan"]) == 3
         ids = [e["id"] for e in events if e["type"] == "token"]
         prompt = hub.orchestrator.tokenizer.encode("Hello world")
         with torch.no_grad():
@@ -297,7 +297,7 @@ async def test_gemma4_with_a_chromebook_browser_on_the_contribute_link(gemma4):
                 c.info["limits"], c.info["limit"] = {"always": True}, 100
             events = [ev async for ev in hub.orchestrator.generate("Hello world", 8)]
             assert [e for e in events if e["type"] == "error"] == []
-            plan = events[0]["plan"]
+            plan = next(e for e in events if e["type"] == "plan")["plan"]
             assert len(plan) == 2 and plan[0][0] == "pc"  # the browser takes the last layers
             ids = [e["id"] for e in events if e["type"] == "token"]
             prompt = hub.orchestrator.tokenizer.encode("Hello world")

@@ -127,7 +127,8 @@ class Hub:
                 from .model import DictSource, load_model
 
                 source = DictSource(*load_model(source))
-            self.orchestrator = Orchestrator(self.endpoint, source, self.workers)
+            self.orchestrator = self._orchestrator(source)
+            self.orchestrator.warm()
         app = web.Application(client_max_size=1 << 30)
         app.add_routes([
             web.get("/", self._index),
@@ -151,6 +152,9 @@ class Hub:
             web.post("/api/generate", self._generate),
             web.get("/api/model", self._model_status),
             web.post("/api/model", self._load_model),
+            web.post("/api/model/unload", self._unload_model),
+            web.get("/api/engine", self._engine_get),
+            web.post("/api/engine", self._engine_set),
             web.get("/static/{name}", self._static),
             web.get("/api/qr.svg", self._qr),
             web.post("/api/devices/{node}/limits", self._set_limits),
@@ -172,7 +176,21 @@ class Hub:
         log.info("hub listening on tcp+udp port %d", self.port)
         self._pinger = asyncio.ensure_future(self._ping_loop())
 
+    def _orchestrator(self, source):
+        from .orchestrator import Orchestrator
+
+        return Orchestrator(self.endpoint, source, self.workers, home=self.loader.cache.parent,
+                            engine_settings=self._engine_settings())
+
+    def _engine_settings(self) -> dict:
+        try:
+            return json.loads((self.loader.cache.parent / "engine.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
     async def close(self) -> None:
+        if self.orchestrator is not None:
+            self.orchestrator.close()
         if getattr(self, "_pinger", None):
             self._pinger.cancel()
         if self._udp:
@@ -623,6 +641,8 @@ class Hub:
                 async for ev in gen:
                     if reply is not None and ev["type"] in ("token", "done"):
                         reply["content"] = ev["text"]
+                        if ev.get("thinking"):
+                            reply["thinking"] = ev["thinking"]
                         self.chat_version += 1
                         if ev["type"] == "done":
                             reply.pop("live", None)
@@ -653,6 +673,7 @@ class Hub:
         return web.json_response({
             "model": o.cfg if o else None,
             "chat_template": bool(o and o.tokenizer.has_chat_template),
+            "engine": (o.engine.info() | {"name": "llama.cpp"}) if o and o.engine else {"name": "mesh"},
             "download": d.as_dict() if d else None,
         })
 
@@ -683,14 +704,65 @@ class Hub:
         return web.json_response(d.as_dict())
 
     async def _switch(self, source) -> None:
-        from .orchestrator import Orchestrator
-
         if self.orchestrator is None:
-            self.orchestrator = Orchestrator(self.endpoint, source, self.workers)
+            self.orchestrator = self._orchestrator(source)
         else:
-            async with self.orchestrator._lock:  # wait for a running generation to finish
+            self.orchestrator.cancel()  # the answer being written stops now instead of finishing first
+            async with self.orchestrator._lock:
                 self.orchestrator.set_model(source)
+        self.orchestrator.warm()
         log.info("now serving %s", source.cfg["name"])
+
+    async def _unload_model(self, request: web.Request) -> web.Response:
+        """Free the model's memory everywhere (the fast engine and every device's layers)."""
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        o = self.orchestrator
+        if o is not None:
+            o.cancel()
+            async with o._lock:
+                o.close()
+            self.orchestrator = None
+            log.info("model unloaded")
+        return web.json_response({"ok": True})
+
+    async def _engine_get(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        from .llamacpp import DEFAULTS, physical_cores
+
+        o = self.orchestrator
+        return web.json_response({"settings": dict(DEFAULTS, **self._engine_settings()), "cores": physical_cores(),
+                                  "engine": o.engine.info() if o and o.engine else None})
+
+    async def _engine_set(self, request: web.Request) -> web.Response:
+        """POST {"engine": "auto"|"mesh", "gpu_layers": "auto"|n, "threads": 0|n, "flash_attn", "context"}."""
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized(text="wrong mesh key")
+        from .llamacpp import DEFAULTS
+
+        body = await request.json()
+        settings = dict(DEFAULTS, **self._engine_settings())
+        try:
+            if "engine" in body:
+                settings["engine"] = "mesh" if body["engine"] == "mesh" else "auto"
+            if "gpu_layers" in body:
+                settings["gpu_layers"] = "auto" if body["gpu_layers"] in ("auto", "", None) else max(0, int(body["gpu_layers"]))
+            if "threads" in body:
+                settings["threads"] = max(0, int(body["threads"] or 0))
+            if "flash_attn" in body:
+                settings["flash_attn"] = bool(body["flash_attn"])
+            if "context" in body:
+                settings["context"] = max(512, min(int(body["context"]), 262144))
+        except (TypeError, ValueError) as e:
+            raise web.HTTPBadRequest(text=f"bad setting: {e}")
+        (self.loader.cache.parent / "engine.json").write_text(json.dumps(settings), encoding="utf-8")
+        o = self.orchestrator
+        if o is not None:
+            o.cancel()
+            async with o._lock:
+                o.set_engine(settings)
+        return web.json_response({"settings": settings})
 
 
 def _candidates(c: _Client) -> list:

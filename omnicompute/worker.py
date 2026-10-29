@@ -79,7 +79,7 @@ def worker_info(mem_fraction: float = 0.5, gpu=None) -> dict:
     return info
 
 
-CONTROL_OPS = {"load", "set_limits", "drop", "preconnect", "info", "credit", "live", "uninstall"}
+CONTROL_OPS = {"load", "unload", "set_limits", "drop", "preconnect", "info", "credit", "live", "uninstall"}
 HYBRID_MIN = 0.15  # below this share, splitting a matrix between CPU and GPU costs more than it saves
 
 
@@ -179,6 +179,15 @@ class Worker:
         if op == "load":
             async with self._busy:
                 return await self._load(header, payload)
+        if op == "unload":  # the main computer unloaded or switched models: free the memory now
+            async with self._busy:
+                self.shards.clear()
+                if self.gpu is not None:
+                    self.gpu.clear()
+                import gc
+
+                gc.collect()
+            return None
         if op == "uninstall":  # the main computer removed this device from the mesh
             if self.on_uninstall is None:
                 raise RuntimeError("this device can't uninstall itself")

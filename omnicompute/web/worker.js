@@ -138,7 +138,7 @@ async function gpuFailed(shard, name) {
 // load / forward / drop run one at a time, in arrival order, so a new model never replaces
 // weights while a step is still using them
 let opQueue = Promise.resolve();
-const SERIAL_OPS = new Set(["load", "forward", "drop"]);
+const SERIAL_OPS = new Set(["load", "unload", "forward", "drop"]);
 
 // ---- usage limits (same rules as omnicompute/limits.py) ----
 
@@ -221,7 +221,7 @@ function sendTo(peer, header, payload) {
   wsSend(packMsg({ type: "relay", to: peer }, packMsg(header, payload)));
 }
 
-const CONTROL_OPS = new Set(["load", "set_limits", "drop", "preconnect", "info", "credit", "live", "uninstall"]);
+const CONTROL_OPS = new Set(["load", "unload", "set_limits", "drop", "preconnect", "info", "credit", "live", "uninstall"]);
 
 async function handle(from, header, payload) {
   const op = header.op;
@@ -233,6 +233,7 @@ async function handle(from, header, payload) {
     setTimeout(() => ws && ws.close(), 200);
     return [{ ok: true, removed: ["browser"] }, null];
   }
+  if (op === "unload") { shards = {}; stats.layers = null; status("ready", { note: "no model loaded" }); return null; }
   if (op === "live") { postMessage({ state: "live", text: header.text, done: header.done }); return null; }
   if (op === "load") {
     const t = decodeTensors(payload);

@@ -85,7 +85,7 @@ async def test_load_from_hugging_face_and_chat(tmp_path, model_file, monkeypatch
             async with s.post(base + "/api/generate", json={"prompt": "hello cat", "max_new": 6, "chat": True}) as r:
                 events = [json.loads(line) async for line in r.content]
         tokens = [e["id"] for e in events if e["type"] == "token"]
-        assert events[0]["type"] == "plan" and len(events[0]["plan"]) == 2
+        assert len(next(e for e in events if e["type"] == "plan")["plan"]) == 2
 
         prompt_ids = tok.encode("<s><|user|> hello cat <|assistant|>", add_special_tokens=False).ids
         with torch.no_grad():

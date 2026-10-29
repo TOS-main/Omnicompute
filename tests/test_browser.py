@@ -43,7 +43,7 @@ async def test_browser_workers_join_and_generate(model_file, monkeypatch):
                 c.info["limits"], c.info["limit"] = {"always": True}, 100
             assert all(c.info.get("cores", 0) >= 1 for c in hub.clients.values() if c.info["kind"] == "browser")
             events, ids = await collect(hub, "hi phones", 10)
-            assert [p[0] for p in events[0]["plan"]] == ["phone0", "phone1", "pc"]
+            assert [p[0] for p in next(e for e in events if e["type"] == "plan")["plan"]] == ["phone0", "phone1", "pc"]
             assert ids == reference(cfg, w, "hi phones", 10)
             await pages[0].wait_for_function("document.getElementById('wstatus').textContent.includes('holding')", timeout=5000)
 
@@ -116,7 +116,7 @@ async def test_contribute_page_with_webgpu(model_file):
                 await asyncio.sleep(0.1)
             assert hub.clients["chromebook"].info["uses"] == "gpu"
             events, ids = await collect(hub, "webgpu", 8)
-            assert [p[0] for p in events[0]["plan"]] == ["pc", "chromebook"]  # helpers stay off the prompt end
+            assert [p[0] for p in next(e for e in events if e["type"] == "plan")["plan"]] == ["pc", "chromebook"]  # helpers stay off the prompt end
             assert ids == reference(cfg, w, "webgpu", 8)
             await page.wait_for_function("document.getElementById('wstatus').textContent.includes('GPU')", timeout=5000)
             await page.wait_for_function("document.getElementById('lastcredit').textContent.includes('% of the work')", timeout=5000)

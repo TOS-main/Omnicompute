@@ -125,6 +125,18 @@
       <div id="current"></div>
     </div>
     <div class="card">
+      <h2>Speed settings for GGUF models</h2>
+      <p class="muted small">A GGUF model runs on <b>llama.cpp</b>, the engine LM Studio uses, on the main computer: the weights stay 4-bit, all layers go on the GPU, and it uses flash attention and one thread per core. Choose <b>Mesh</b> to split a model too big for one computer across your devices instead.</p>
+      <div class="engine-grid">
+        <label>Engine <select id="eng-engine"><option value="auto">Fast: llama.cpp on the main computer</option><option value="mesh">Mesh: split across devices</option></select></label>
+        <label>GPU offload (layers) <input id="eng-gpu" placeholder="auto = all of them" autocomplete="off"></label>
+        <label>CPU threads <input id="eng-threads" type="number" min="0" placeholder="0 = one per core"></label>
+        <label>Context (tokens) <input id="eng-ctx" type="number" min="512" step="512"></label>
+        <label class="check"><input id="eng-fa" type="checkbox"> Flash attention</label>
+      </div>
+      <div class="row"><button id="eng-save" class="primary" type="button">Apply</button><span id="eng-msg" class="muted small"></span></div>
+    </div>
+    <div class="card">
       <h2>What your mesh can run</h2>
       <div id="capacity"></div>
     </div>
@@ -157,7 +169,7 @@
       </form>
       <div id="estimate"></div>
       <div id="dl" hidden><div class="meter big"><div id="dlbar"></div></div><p id="dltext" class="muted"></p></div>
-      <p class="muted small">Works with Llama, Mistral, Qwen, Phi-3, Gemma 4 (GGUF, computers and the app only), SmolLM, TinyLlama and GPT-2 models and their fine-tunes, as .safetensors or .gguf (GGUF repos use Q4_K_M unless you add <code>:Q8_0</code> or another type). Only the main computer downloads; each device receives just its layers.</p>
+      <p class="muted small">Works with Llama, Mistral, Qwen, Phi-3, Gemma 4 (GGUF), SmolLM, TinyLlama and GPT-2 models and their fine-tunes, as .safetensors or .gguf (GGUF repos use Q4_K_M unless you add <code>:Q8_0</code> or another type). Only the main computer downloads; each device receives just its layers.</p>
     </div>
   </section>
 

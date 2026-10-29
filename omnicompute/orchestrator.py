@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -28,12 +29,20 @@ MAX_REPLANS = 3
 
 
 class Orchestrator:
-    def __init__(self, endpoint, source, list_workers):
+    def __init__(self, endpoint, source, list_workers, home: Path | None = None, engine_settings: dict | None = None):
         """endpoint: a Messenger whose handler we own. source: DictSource or HFSource.
-        list_workers: () -> [{"node_id", "info"}]."""
+        list_workers: () -> [{"node_id", "info"}]. home: where the fast engine (llama.cpp) for
+        GGUF models lives; None = always split models across the mesh."""
+        from .llamacpp import DEFAULTS
+
         self.endpoint = endpoint
         endpoint.handler = self.handle
         self.list_workers = list_workers
+        self.home = home
+        self.engine_settings = dict(DEFAULTS, **(engine_settings or {}))
+        self.engine = None
+        self.loaded: dict[str, tuple[int, int]] = {}
+        self._cancel = False
         self.set_model(source)
         self._waiters: dict[str, asyncio.Future] = {}
         self._routes: dict[str, set[str]] = {}  # req -> devices the in-flight step depends on
@@ -49,12 +58,68 @@ class Orchestrator:
 
     def set_model(self, source) -> None:
         """Switch models; devices receive the new layers on the next generation."""
+        self.unload_devices()
+        if self.engine is not None:
+            self.engine.stop()
         self.source, self.cfg = source, source.cfg
         self.model_id = f"{self.cfg.get('name', 'model')}-{os.urandom(3).hex()}"
         self.tokenizer = load_tokenizer(source)
         self.half = getattr(source, "dtype", np.float32) == np.float16
         self.plan: list[tuple[str, int, int]] = []
-        self.loaded: dict[str, tuple[int, int]] = {}
+        self.loaded = {}
+        self.engine = self._make_engine()
+
+    def _make_engine(self):
+        """llama.cpp for a GGUF file, unless the mesh is chosen (see llamacpp.py)."""
+        path = getattr(self.source, "path", None)
+        if (self.home is None or path is None or Path(path).suffix.lower() != ".gguf"
+                or os.environ.get("OMNICOMPUTE_LLAMA") == "off" or self.engine_settings.get("engine") == "mesh"):
+            return None
+        from .llamacpp import Engine
+
+        return Engine(self.home, Path(path), self.cfg)
+
+    def set_engine(self, settings: dict) -> None:
+        """New engine settings (Models tab): restart the engine with them, or switch engines."""
+        self.engine_settings.update(settings)
+        if self.engine is not None and self.engine_settings.get("engine") == "mesh":
+            self.engine.stop()
+            self.engine = None
+        elif self.engine is None and self.engine_settings.get("engine") != "mesh":
+            self.engine = self._make_engine()
+            if self.engine is not None:
+                self.unload_devices()
+        self.warm()
+
+    def _main_machine(self) -> tuple[str, dict | None]:
+        for w in self.list_workers():
+            if w["info"].get("hub_machine"):
+                return w["node_id"], w["info"]
+        return "main computer", None
+
+    def warm(self) -> None:
+        """Start the fast engine now, so the model is in memory before the first question."""
+        if self.engine is not None:
+            _, info = self._main_machine()
+            self.engine.start(self.engine_settings, (info or {}).get("limits"))
+
+    def unload_devices(self) -> None:
+        """Tell every device holding layers to free them (unload, or a switch to the fast engine)."""
+        for node in list(self.loaded):
+            asyncio.ensure_future(self.endpoint.notify(node, {"op": "unload"}))
+        self.loaded = {}
+        self.plan = []
+
+    def cancel(self) -> None:
+        """Stop the answer being written now (a new model is loading)."""
+        self._cancel = True
+
+    def close(self) -> None:
+        self.cancel()
+        self.unload_devices()
+        if self.engine is not None:
+            self.engine.stop()
+            self.engine = None
 
     async def handle(self, peer_id: str, header: dict, payload: bytes):
         fut = self._waiters.get(header.get("req"))
@@ -128,19 +193,29 @@ class Orchestrator:
         """Async generator yielding events: {"plan"}, {"token", "text"}, {"replan"}, {"done", "stats"}.
         `prompt` is a string, or a list of chat messages [{"role", "content"}] for multi-turn chat."""
         async with self._lock:
+            self._cancel = False
+            if self.engine is not None:
+                fast = {"ok": False}
+                async for ev in self._generate_fast(prompt, max_new, temperature, chat, context, fast):
+                    yield ev
+                if fast["ok"]:
+                    return
             rng = np.random.default_rng(seed)
             ctx = max(16, min(int(context or self.cfg.get("ctx_default", self.cfg["n_ctx"])), self.cfg["n_ctx"]))
             ids = self.tokenizer.encode(prompt, chat=chat)[-(ctx - 1):] or [0]
             exclude: set[str] = set()
+            if any(self.loaded.get(n) is None for n, _, _ in self.plan) or not self.plan:
+                yield {"type": "status", "text": "Sending the model's layers to the devices…"}
             await self.ensure_plan()
             yield {"type": "plan", "plan": [list(p) for p in self.plan], "prompt_tokens": len(ids), "context": ctx,
-                   "estimate": self.estimate.get("tok_per_s") if self.estimate else None}
+                   "estimate": self.estimate.get("tok_per_s") if self.estimate else None, "engine": "mesh"}
+            yield {"type": "status", "text": f"Reading your prompt ({len(ids)} tokens)…"}
             job, pos, pending = os.urandom(6).hex(), 0, list(ids)
             out_ids: list[int] = []
             replans, t0, first_token, last_push = 0, time.monotonic(), None, 0.0
             self.busy = {}
             try:
-                while len(out_ids) < max_new and pos + len(pending) < ctx:
+                while len(out_ids) < max_new and pos + len(pending) < ctx and not self._cancel:
                     try:
                         logits = await self._step(job, np.array(pending, np.int32), pos)
                     except (RuntimeError, asyncio.TimeoutError, ConnectionError) as e:
@@ -183,11 +258,72 @@ class Orchestrator:
                                  "tok_per_s": round((len(out_ids) - 1) / gen_dt, 2) if gen_dt > 0 else None,
                                  "devices": len(self.plan), "finished": time.time(),
                                  "prompt_tokens": len(ids), "context": ctx,
-                                 "stopped": "context" if pos + len(pending) >= ctx else
+                                 "engine": "mesh",
+                                 "stopped": "switched" if self._cancel else "context" if pos + len(pending) >= ctx else
                                             "length" if len(out_ids) >= max_new else "eos",
                                  "load": {n: round(min(100.0, 100 * b / max(dt, 1e-6)), 1) for n, b in self.busy.items()},
                                  "contribution": contribution}
             yield {"type": "done", "text": self.tokenizer.decode(out_ids), "stats": self.last_run}
+
+    async def _generate_fast(self, prompt, max_new, temperature, chat, context, result: dict):
+        """generate() on llama.cpp. Sets result["ok"] when it ran; otherwise the mesh takes over."""
+        eng = self.engine
+        settings = dict(self.engine_settings)
+        if context:
+            settings["context"] = max(int(settings.get("context") or 0), int(context))
+        node, info = self._main_machine()
+        eng.start(settings, (info or {}).get("limits"))
+        while eng._ready is not None and not eng._ready.done():
+            yield {"type": "status", "text": eng.note or "Starting the fast engine…"}
+            await asyncio.wait([eng._ready], timeout=1)
+            if self._cancel:
+                return
+        if not await eng.ready():
+            yield {"type": "status", "text": f"The fast engine didn't start ({eng.error}); splitting the model across devices instead."}
+            return
+        result["ok"] = True
+        n = self.cfg["n_layer"]
+        self.plan = [(node, 0, n)]
+        prompt_tokens = len(self.tokenizer.encode(prompt, chat=chat))
+        yield {"type": "plan", "plan": [[node, 0, n]], "prompt_tokens": prompt_tokens, "context": int(eng.info()["context"] or 0),
+               "estimate": None, "engine": "llama.cpp"}
+        yield {"type": "status", "text": f"Reading your prompt ({prompt_tokens} tokens)…"}
+        text, thinking, pieces, timings = "", "", 0, {}
+        t0, first, last_push = time.monotonic(), None, 0.0
+        stopped = "eos"
+        try:
+            async for kind, piece in eng.generate(prompt, max_new, temperature, chat):
+                if self._cancel:
+                    stopped = "switched"
+                    break
+                if kind == "timings":
+                    timings = piece
+                    continue
+                first = first or time.monotonic()
+                pieces += 1
+                if kind == "thinking":
+                    thinking += piece
+                else:
+                    text += piece
+                if time.monotonic() - last_push > 0.5:
+                    last_push = time.monotonic()
+                    self._push_live(text, False)
+                yield {"type": "token", "id": None, "text": text, "thinking": thinking, "load": {node: 100.0}}
+        finally:
+            dt = time.monotonic() - t0
+            tokens = int(timings.get("predicted_n") or pieces)
+            if tokens >= max_new:
+                stopped = "length"
+            self._push_live(text, True)
+            self.last_run = {"tokens": tokens, "seconds": round(dt, 2), "engine": "llama.cpp",
+                             "first_token_s": round(first - t0, 2) if first else None,
+                             "tok_per_s": round(timings["predicted_per_second"], 2) if timings.get("predicted_per_second")
+                             else round(pieces / (time.monotonic() - first), 2) if first and pieces > 1 else None,
+                             "prompt_tok_per_s": round(timings["prompt_per_second"], 1) if timings.get("prompt_per_second") else None,
+                             "devices": 1, "finished": time.time(), "prompt_tokens": prompt_tokens,
+                             "context": int(eng.info()["context"] or 0), "stopped": stopped, "load": {node: 100.0},
+                             "gpu_layers": eng.info()["gpu_layers"], "contribution": []}
+        yield {"type": "done", "text": text, "thinking": thinking, "stats": self.last_run}
 
     def _push_live(self, text: str, done: bool) -> None:
         """Show the answer being written on the devices computing it (not the hub's own machine)."""

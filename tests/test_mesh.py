@@ -62,7 +62,7 @@ async def test_generation_across_devices_matches_single_device(model_file):
     try:
         events, ids = await collect(hub, "hello mesh", 12)
         assert ids == reference(cfg, w, "hello mesh", 12)
-        plan = events[0]["plan"]
+        plan = next(e for e in events if e["type"] == "plan")["plan"]
         assert [p[0] for p in plan] == ["a", "b", "c"] and plan[-1][2] == 6
         # a -> b punched a direct UDP path; c is relay-only so b -> c went through the hub
         a, b, c = nodes

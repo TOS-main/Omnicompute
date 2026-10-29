@@ -153,8 +153,12 @@ def uninstall(home: Path) -> list[str]:
     install_dir = Path(sys.prefix).parent  # the installer puts the venv inside its folder
     if (install_dir / MARKER).exists():
         folders.append(install_dir)
-        if home.exists() and home.resolve() != install_dir.resolve():
+        # a main computer's folder holds its mesh key, models and chats: never deleted here
+        keeps = home.exists() and ((home / "mesh.key").exists() or any((home / "models").glob("*")))
+        if home.exists() and home.resolve() != install_dir.resolve() and not keeps:
             folders.append(home)
+        if platform.system() == "Windows":
+            (Path.home() / "Desktop" / "Omnicompute host.lnk").unlink(missing_ok=True)
     if not folders:
         return []
     pid = os.getpid()

@@ -121,7 +121,7 @@ function makeCard(d) {
   const c = { badges: el("div", { class: "badges" }), stats: el("div", { class: "stats" }), platform: el("div", { class: "muted small" }),
     limitSlot: el("div"), msg: el("p", { class: "small muted" }) };
   const remove = d.is_hub_machine ? null : el("button", { class: "ghost small danger", type: "button", title: "take it off the mesh",
-    onclick: () => removeDevice(d, c) }, "Remove");
+    onclick: () => removeDevice(d, c) }, "Remove & uninstall");
   c.card = el("div", { class: "card dev" }, el("div", { class: "head row space" }, el("div", {}, el("div", { class: "name" }, d.node_id), c.platform), remove),
     c.badges, c.stats, c.limitSlot, c.msg);
   $("devices").append(c.card);
@@ -300,7 +300,7 @@ function clampMaxNew() {
 function applyModel(cfg) {
   const name = cfg ? cfg.name : null;
   $("demo-banner").hidden = !(cfg && cfg.tokenizer === "bytes");
-  if (!cfg) { $("modelline").textContent = "No model loaded."; return; }
+  if (!cfg) { $("modelline").textContent = "No model loaded."; state.model = null; return; }
   const limit = cfg.n_ctx, ctx = $("ctx");
   if (state.model !== name) {
     state.model = name;
@@ -360,8 +360,10 @@ function renderChat() {
 }
 
 function statsLine(st) {
-  return `${st.tokens} tokens · ${st.tok_per_s ?? "–"} tok/s · first token ${st.first_token_s ?? "–"}s · ${st.devices} device(s)`
-    + (st.stopped === "length" ? " · hit the max-token limit" : st.stopped === "context" ? " · context full" : "");
+  return `${st.tokens} tokens · ${st.tok_per_s ?? "–"} tok/s · first token ${st.first_token_s ?? "–"}s · `
+    + (st.engine === "llama.cpp" ? `llama.cpp${st.prompt_tok_per_s ? ` (prompt ${st.prompt_tok_per_s} tok/s)` : ""}` : `${st.devices} device(s)`)
+    + (st.stopped === "length" ? " · hit the max-token limit" : st.stopped === "context" ? " · context full"
+      : st.stopped === "switched" ? " · stopped: another model was loaded" : "");
 }
 
 // who did how much of this answer: share of the compute time, and the layers each device ran
@@ -379,9 +381,11 @@ function messageEl(m, streaming) {
   const bubble = el("div", { class: `bubble${settings.markdown ? "" : " plain"}${streaming ? " cursor" : ""}` });
   if (settings.markdown) bubble.innerHTML = renderMarkdown(m.content || "", streaming);
   else bubble.textContent = m.content;
-  if (streaming && !m.content) bubble.textContent = "";
+  if (streaming && !m.content) { bubble.textContent = m.thinking ? "" : m.status || "…"; bubble.classList.add("waiting"); }
   const meta = m.meta || (m.stats ? statsLine(m.stats) : m.stopped ? "stopped" : null);
-  return el("div", { class: "msg ai" }, el("div", { class: "who" }, m.model ? m.model.split("/").pop() : "assistant"), bubble,
+  const think = m.thinking ? el("details", { class: "thinking", open: streaming && !m.content ? "" : null },
+    el("summary", {}, streaming && !m.content ? "Thinking…" : "Thought process"), el("div", { class: "small" }, m.thinking)) : null;
+  return el("div", { class: "msg ai" }, el("div", { class: "who" }, m.model ? m.model.split("/").pop() : "assistant"), think, bubble,
     meta ? el("div", { class: "meta" }, meta) : null, contributionEl(m.stats && m.stats.contribution));
 }
 
@@ -430,16 +434,21 @@ async function send(text) {
       while ((nl = buf.indexOf("\n")) >= 0) {
         const ev = JSON.parse(buf.slice(0, nl));
         buf = buf.slice(nl + 1);
-        if (ev.type === "plan") {
+        if (ev.type === "status") {
+          reply.status = ev.text;
+          showLive(ev.text, {});
+          updateLastMessage(true);
+        } else if (ev.type === "plan") {
           promptTokens = ev.prompt_tokens; est = ev.estimate;
-          showLive(`Prompt ${promptTokens} tokens · ${ev.plan.length} device(s)${est ? ` · est. ${est} tok/s` : ""} · loading layers / reading prompt…`, {});
+          showLive(`Prompt ${promptTokens} tokens · ${ev.engine === "llama.cpp" ? "llama.cpp on the main computer" : `${ev.plan.length} device(s)`}${est ? ` · est. ${est} tok/s` : ""} · reading prompt…`, {});
         } else if (ev.type === "token") {
           tokens++;
           first = first || performance.now();
           reply.content = ev.text;
+          reply.thinking = ev.thinking || "";
           state.liveLoad = ev.load || {};
           const rate = tokens > 1 ? ((tokens - 1) / ((performance.now() - first) / 1000)).toFixed(1) : "…";
-          showLive(`${tokens} tokens · ${rate} tok/s · first token ${((first - t0) / 1000).toFixed(1)}s`, ev.load);
+          showLive(`${!ev.text && ev.thinking ? "Thinking · " : ""}${tokens} tokens · ${rate} tok/s · first token ${((first - t0) / 1000).toFixed(1)}s`, ev.load);
           lastCtxUse = promptTokens + tokens;
           updateCtxMeter();
           updateLastMessage(true);
@@ -447,6 +456,7 @@ async function send(text) {
           showLive(`A device dropped out, continuing on ${ev.plan.length}…`, {});
         } else if (ev.type === "done") {
           reply.content = ev.text;
+          reply.thinking = ev.thinking || reply.thinking;
           reply.stats = ev.stats;
           state.liveLoad = ev.stats.load || {};
         } else if (ev.type === "error") {
@@ -583,7 +593,10 @@ async function refreshModelInfo() {
         c.tokenizer === "bytes" ? el("span", { class: "badge relay" }, "test model, random weights") : el("span", { class: "badge on" }, m.chat_template ? "chat model" : "text model")),
       el("div", { class: "kv" }, stat(c.n_layer, "layers"), stat(fmtNum(Math.round((e && e.memory_bytes_total || 0) / 4)), "parameters"),
         stat(c.n_ctx.toLocaleString(), "max context"), stat(c.hf_type || c.arch || "gpt2", "architecture")),
-      e ? estimateView(e, "Expected speed on your current devices") : null);
+      engineLine(m.engine),
+      m.engine && m.engine.name === "llama.cpp" ? null : e ? estimateView(e, "Expected speed on your current devices") : null,
+      el("div", { class: "row" }, el("button", { class: "small ghost", type: "button", onclick: unloadModel,
+        title: "free its memory on the main computer and every device" }, "Unload model")));
   }
   const d = m.download, busy = d && ["starting", "downloading", "loading"].includes(d.state);
   // say it next to the model too: a failed Load keeps the old model running
@@ -600,7 +613,8 @@ async function refreshModelInfo() {
       : d.state === "loading" ? `Preparing ${d.repo}…` : `Starting ${d.repo}…`;
   }
   clearTimeout(refreshModelInfo.t);
-  refreshModelInfo.t = setTimeout(refreshModelInfo, busy ? 1000 : 10000);
+  const engineBusy = m.engine && ["starting", "loading"].includes(m.engine.state);
+  refreshModelInfo.t = setTimeout(refreshModelInfo, busy || engineBusy ? 1000 : 10000);
   if (busy !== refreshModelInfo.wasBusy) refreshDownloaded();
   refreshModelInfo.wasBusy = busy;
 }
@@ -623,6 +637,39 @@ async function refreshDownloaded() {
       !m.loaded && m.removable !== false ? el("button", { class: "small ghost danger", type: "button", onclick: () => uninstall(m.name || m.repo, m.repo, m.bytes) }, "Uninstall") : null)))),
   el("p", { class: "muted small" }, `${gb(total)} used on the main computer's disk.`));
 }
+
+function engineLine(g) {
+  if (!g || g.name !== "llama.cpp") return el("p", { class: "muted small" }, "Runs split across your devices (mesh).");
+  if (g.state === "error") return el("p", { class: "bad small" }, `The fast engine didn't start: ${g.error}. Using the mesh instead.`);
+  if (g.state !== "ready") return el("p", { class: "muted small" }, g.note || "Starting llama.cpp…");
+  const gl = g.gpu_layers === "999" ? "all layers on the GPU" : g.gpu_layers === "0" ? "CPU only" : `${g.gpu_layers} layers on the GPU`;
+  return el("p", { class: "small" }, el("span", { class: "badge on" }, "llama.cpp"), ` running on the main computer · ${gl} · ${g.threads} threads · context ${g.context}`);
+}
+
+async function unloadModel() {
+  if (!confirm("Unload the model? Its memory is freed everywhere; load it again from the list below.")) return;
+  const r = await api("/api/model/unload", { method: "POST" });
+  if (!r.ok) alert(await r.text());
+  refreshModelInfo(); refreshDownloaded(); refreshStatus();
+}
+
+async function loadEngine() {
+  let r;
+  try { r = await (await api("/api/engine")).json(); } catch { return; }
+  const s = r.settings;
+  $("eng-engine").value = s.engine; $("eng-gpu").value = s.gpu_layers === "auto" ? "" : s.gpu_layers;
+  $("eng-threads").value = s.threads || ""; $("eng-threads").placeholder = `0 = one per core (${r.cores})`;
+  $("eng-ctx").value = s.context; $("eng-fa").checked = !!s.flash_attn;
+}
+$("eng-save").onclick = async () => {
+  const body = { engine: $("eng-engine").value, gpu_layers: $("eng-gpu").value.trim() || "auto",
+    threads: +$("eng-threads").value || 0, context: +$("eng-ctx").value || 8192, flash_attn: $("eng-fa").checked };
+  $("eng-msg").textContent = "Applying…";
+  const r = await api("/api/engine", { method: "POST", body: JSON.stringify(body) });
+  $("eng-msg").textContent = r.ok ? "Applied. The model restarts with these settings." : await r.text();
+  refreshModelInfo();
+};
+loadEngine();
 
 async function loadRepo(repo) {
   const r = await api("/api/model", { method: "POST", body: JSON.stringify({ repo, token: $("hftoken").value.trim() }) });

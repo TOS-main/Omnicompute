@@ -189,7 +189,7 @@ async def test_upload_and_load_a_gguf_then_generate(tmp_path, model_file):
             async with s.post(base + "/api/generate", json={"prompt": prompt, "max_new": 6}) as r:
                 events = [json.loads(line) async for line in r.content]
         tokens = [e["id"] for e in events if e["type"] == "token"]
-        assert len(events[0]["plan"]) == 2
+        assert len(next(e for e in events if e["type"] == "plan")["plan"]) == 2
         ids = hub.orchestrator.tokenizer.encode(prompt)
         with torch.no_grad():
             ref = model.generate(torch.tensor([ids]), max_new_tokens=6, do_sample=False,
