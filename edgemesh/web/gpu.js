@@ -10,18 +10,28 @@ struct P { K: u32, N2: u32, T: u32, pad: u32 };
 @group(0) @binding(1) var<storage, read> X: array<f32>;
 @group(0) @binding(2) var<storage, read_write> Y: array<vec2<f32>>;
 @group(0) @binding(3) var<uniform> p: P;
+var<workgroup> part: array<vec2<f32>, 256>;
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) g: vec3<u32>) {
-  let n = g.x;
-  let t = g.y;
-  if (n >= p.N2) { return; }
+// 32 column pairs per workgroup, each summed by 8 threads over every 8th row, so a GPU's
+// thousands of threads all stay busy even on small matrices.
+@compute @workgroup_size(32, 8)
+fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
+  let n = wg.x * 32u + l.x;
+  let t = wg.y;
   var acc = vec2<f32>(0.0, 0.0);
-  let xo = t * p.K;
-  for (var k = 0u; k < p.K; k = k + 1u) {
-    acc = acc + X[xo + k] * unpack2x16float(W[k * p.N2 + n]);
+  if (n < p.N2) {
+    let xo = t * p.K;
+    for (var k = l.y; k < p.K; k = k + 8u) {
+      acc = acc + X[xo + k] * unpack2x16float(W[k * p.N2 + n]);
+    }
   }
-  Y[t * p.N2 + n] = acc;
+  part[l.y * 32u + l.x] = acc;
+  workgroupBarrier();
+  if (l.y == 0u && n < p.N2) {
+    var s = part[l.x];
+    for (var i = 1u; i < 8u; i = i + 1u) { s = s + part[i * 32u + l.x]; }
+    Y[t * p.N2 + n] = s;
+  }
 }`;
 
 // float32 -> float16 bits (round to nearest even)
@@ -68,7 +78,7 @@ class GpuPool {
 
   has(name) { return this.mats.has(name); }
 
-  async clear() { for (const m of this.mats.values()) for (const c of m.chunks) c.buf.destroy(); this.mats.clear(); }
+  async clear() { for (const name of [...this.mats.keys()]) this.drop(name); }
 
   // W[K,N] row-major Float32Array -> column chunks of packed half pairs
   async putMatrix(name, t) {
@@ -99,11 +109,13 @@ class GpuPool {
     await this.putMatrix(name, { data: tr, shape: [D, V] });
   }
 
-  async mm(name, x, T) {
-    const dev = this.device, m = this.mats.get(name);
-    const xbuf = dev.createBuffer({ size: Math.max(16, x.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    dev.queue.writeBuffer(xbuf, 0, x.buffer, x.byteOffset, x.byteLength);
-    const enc = dev.createCommandEncoder(), reads = [], temps = [xbuf];
+  // Input, output and readback buffers for one matrix; kept for one-token steps (same shapes every token).
+  buffers(name, T) {
+    const m = this.mats.get(name);
+    if (T === 1 && m.step) return m.step;
+    const dev = this.device;
+    const xbuf = dev.createBuffer({ size: Math.max(16, T * m.K * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    const all = [xbuf], chunks = [];
     for (const c of m.chunks) {
       const size = T * c.n2 * 8;
       const out = dev.createBuffer({ size, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -113,40 +125,58 @@ class GpuPool {
       const bind = dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: c.buf } }, { binding: 1, resource: { buffer: xbuf } },
         { binding: 2, resource: { buffer: out } }, { binding: 3, resource: { buffer: uni } }] });
+      all.push(out, read, uni);
+      chunks.push({ c, out, read, bind, size });
+    }
+    const set = { xbuf, chunks, all };
+    if (T === 1) m.step = set;
+    return set;
+  }
+
+  async mm(name, x, T) {
+    const dev = this.device, m = this.mats.get(name), set = this.buffers(name, T);
+    dev.queue.writeBuffer(set.xbuf, 0, x.buffer, x.byteOffset, x.byteLength);
+    const enc = dev.createCommandEncoder();
+    for (const { c, out, read, bind, size } of set.chunks) {
       const pass = enc.beginComputePass();
       pass.setPipeline(this.pipeline);
       pass.setBindGroup(0, bind);
-      pass.dispatchWorkgroups(Math.ceil(c.n2 / 64), T, 1);
+      pass.dispatchWorkgroups(Math.ceil(c.n2 / 32), T, 1);
       pass.end();
       enc.copyBufferToBuffer(out, 0, read, 0, size);
-      reads.push([c, read]);
-      temps.push(out, uni);
     }
     dev.queue.submit([enc.finish()]);
     const y = new Float32Array(T * m.N);
-    await Promise.all(reads.map(async ([c, read]) => {
+    await Promise.all(set.chunks.map(async ({ c, read }) => {
       await read.mapAsync(GPUMapMode.READ);
       const part = new Float32Array(read.getMappedRange()), w = c.n2 * 2, c0 = c.p0 * 2, keep = Math.min(w, m.N - c0);
       for (let t = 0; t < T; t++) y.set(part.subarray(t * w, t * w + keep), t * m.N + c0);
       read.unmap();
-      read.destroy();
     }));
-    for (const b of temps) b.destroy();
+    if (T !== 1) for (const b of set.all) b.destroy();
     return y;
   }
 
-  // effective GFLOP/s for vector x 1024x1024 matrix, including the round trip
+  drop(name) {
+    const m = this.mats.get(name);
+    if (!m) return;
+    for (const c of m.chunks) c.buf.destroy();
+    if (m.step) for (const b of m.step.all) b.destroy();
+    this.mats.delete(name);
+  }
+
+  // effective GFLOP/s for one generation step through a 2048x2048 matrix, round trip included
   async bench() {
-    const N = 1024, w = new Float32Array(N * N), x = new Float32Array(N).fill(0.5);
+    const N = 2048, w = new Float32Array(N * N), x = new Float32Array(N).fill(0.5);
     for (let i = 0; i < w.length; i++) w[i] = ((i * 2654435761) % 1000) / 1000 - 0.5;
     await this.putMatrix("_bench", { data: w, shape: [N, N] });
     await this.mm("_bench", x, 1);
     let n = 0;
     const t0 = performance.now();
     while (performance.now() - t0 < 300) { await this.mm("_bench", x, 1); n++; }
-    for (const c of this.mats.get("_bench").chunks) c.buf.destroy();
-    this.mats.delete("_bench");
-    return (n * 2 * N * N) / ((performance.now() - t0) / 1000) / 1e9;
+    const s = (performance.now() - t0) / 1000;
+    this.drop("_bench");
+    return (n * 2 * N * N) / s / 1e9;
   }
 }
 

@@ -35,16 +35,16 @@ log = logging.getLogger("edgemesh.worker")
 def benchmark() -> float:
     """Effective GFLOP/s for token-by-token generation, used to size each device's share of
     layers and to estimate speed. Generation multiplies one vector by every weight matrix, which
-    is limited by memory bandwidth, so this times a vector x matrix product on a 2048x2048
-    float32 matrix (16 MB, bigger than CPU caches)."""
-    w = np.random.default_rng(0).standard_normal((2048, 2048), dtype=np.float32)
-    x = np.ones((1, 2048), np.float32)
+    is limited by memory bandwidth, so this times a vector x matrix product on a 4096x4096
+    float32 matrix (64 MB, bigger than CPU caches, the size of a 7B model's attention weights)."""
+    w = np.random.default_rng(0).standard_normal((4096, 4096), dtype=np.float32)
+    x = np.ones((1, 4096), np.float32)
     x @ w
     n, t0 = 0, time.perf_counter()
     while time.perf_counter() - t0 < 0.4:
         x @ w
         n += 1
-    return round(n * 2 * 2048 * 2048 / (time.perf_counter() - t0) / 1e9, 2)
+    return round(n * 2 * 4096 * 4096 / (time.perf_counter() - t0) / 1e9, 2)
 
 
 def total_memory_mb() -> int:

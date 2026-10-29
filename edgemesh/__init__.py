@@ -1,3 +1,3 @@
 """EdgeMesh: split AI model inference across devices on any network."""
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
