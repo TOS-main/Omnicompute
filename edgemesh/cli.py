@@ -285,7 +285,11 @@ async def cmd_links(args) -> None:
     origin = f"http://{_lan_ip()}:{port or 8000}"
     print(f"Mesh key: {key}   (stored in {HOME / 'mesh.key'})")
     print(f"  Full link (chat, settings, join):  {origin}/?k={key}")
-    print(f"  Contribute-only link:              {origin}/contribute?c={contribute_key(key)}")
+    ck = contribute_key(key)
+    print(f"  Contribute-only link:              {origin}/contribute?c={ck}")
+    print("  Install on another computer (runs in the background, uses its GPU):")
+    print(f"    Windows PowerShell:  irm \"{origin}/install.ps1?c={ck}\" | iex")
+    print(f"    Mac / Linux:         curl -fsSL \"{origin}/install.sh?c={ck}\" | sh")
     if port is None:
         print("  (EdgeMesh isn't hosting on this computer right now; the port is 8000 unless it was busy.)")
 

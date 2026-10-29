@@ -369,4 +369,4 @@ def test_mesh_key_is_kept_and_can_be_set(tmp_path, monkeypatch, capsys):
     assert cli._mesh_key(None) == "my-own-key-1"  # yours from then on
     asyncio.run(cli.cmd_links(argparse.Namespace(key=None)))
     out = capsys.readouterr().out
-    assert "?k=my-own-key-1" in out and "contribute?c=c" in out
+    assert "?k=my-own-key-1" in out and "contribute?c=c" in out and "install.ps1?c=c" in out
