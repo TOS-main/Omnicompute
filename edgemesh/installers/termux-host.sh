@@ -43,11 +43,15 @@ echo "Installing Python and libraries (a few minutes)..."
 pkg update -y >/dev/null 2>&1 || true
 pkg install -y python python-numpy python-cryptography cloudflared unzip >/dev/null
 # tokenizers is compiled code: use Termux's package when there is one, otherwise build it once
-pkg install -y python-tokenizers >/dev/null 2>&1 || {
-  echo "Building the tokenizer library (one time, can take 10-20 minutes)..."
+if ! python -c "import tokenizers" 2>/dev/null; then
+  pkg install -y python-tokenizers >/dev/null 2>&1 || true
+fi
+if ! python -c "import tokenizers" 2>/dev/null; then
+  echo "Building the tokenizer library (one time, can take 10-20 minutes; keep Termux open)..."
   pkg install -y rust binutils >/dev/null
-  pip install --quiet tokenizers
-}
+  export ANDROID_API_LEVEL="$(getprop ro.build.version.sdk)"  # the Rust build tool needs it on Android
+  pip install tokenizers || echo "WARNING: the tokenizer library didn't build, so Hugging Face models won't load here yet."
+fi
 pip install --quiet --disable-pip-version-check aiohttp jinja2 segno threadpoolctl
 
 mkdir -p "$DIR"
