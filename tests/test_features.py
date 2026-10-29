@@ -629,7 +629,7 @@ async def test_android_app_helps_a_computers_mesh_from_its_contribute_link(tmp_p
     assert android.check_link(link) == "" and android.check_link("hello")
     android.join(str(tmp_path), link, name="chromebook")
     try:
-        for _ in range(100):
+        for _ in range(600):  # slow CI machines take a while to measure their speed first
             if any(w["node_id"] == "chromebook" for w in hub.workers()):
                 break
             await asyncio.sleep(0.1)
