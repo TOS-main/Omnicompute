@@ -22,8 +22,35 @@ from .protocol import decode_tensors, encode_tensors
 # ---------------------------------------------------------------- weights
 
 
+def _gemma4_shapes(cfg: dict) -> tuple[dict, dict]:
+    D, V, L, P = cfg["n_embd"], cfg["vocab"], cfg["n_layer"], cfg.get("ple_dim", 0)
+    g = {"embed": (V, D), "norm_f": (D,)}
+    if not cfg.get("tie_embeddings"):
+        g["lm_head"] = (D, V)
+    if P:  # the table travels quantized: about one byte per weight (see shard_bytes)
+        g.update({"ple_embed.q": (V, L * P), "ple_embed.type": (1,), "ple_proj.w": (D, L * P), "ple_norm": (P,)})
+    per = {}
+    for i in range(L):
+        hd = cfg["head_dim_swa"] if cfg["swa"][i] else cfg["head_dim"]
+        kv, H, F = cfg["n_kv_heads"][i], cfg["n_head"], cfg["ffns"][i]
+        p = f"h.{i}."
+        per.update({p + "attn_norm": (D,), p + "q.w": (D, H * hd), p + "q_norm": (hd,), p + "o.w": (H * hd, D),
+                    p + "post_attn_norm": (D,), p + "mlp_norm": (D,), p + "gate.w": (D, F), p + "up.w": (D, F),
+                    p + "down.w": (F, D), p + "post_mlp_norm": (D,), p + "out_scale": (1,)})
+        if i < L - cfg.get("n_kv_shared", 0):  # shared layers reuse an earlier layer's keys and values
+            per.update({p + "k.w": (D, kv * hd), p + "k_norm": (hd,)})
+            if not cfg["k_eq_v"][i]:
+                per[p + "v.w"] = (D, kv * hd)
+        if P:
+            per.update({p + "ple_gate.w": (D, P), p + "ple_out.w": (P, D), p + "ple_post_norm": (D,)})
+    return g, per
+
+
 def tensor_shapes(cfg: dict) -> tuple[dict, dict]:
-    """(global tensors, per-layer tensors with "{i}" in the name) -> shapes."""
+    """(global tensors, per-layer tensors with "{i}" in the name) -> shapes.
+    Gemma 4's layers differ from each other, so its per-layer names already carry the index."""
+    if cfg.get("arch") == "gemma4":
+        return _gemma4_shapes(cfg)
     D, V = cfg["n_embd"], cfg["vocab"]
     if cfg.get("arch", "gpt2") == "gpt2":
         g = {"wte": (V, D), "wpe": (cfg["n_ctx"], D), "ln_f.w": (D,), "ln_f.b": (D,)}
@@ -45,6 +72,8 @@ def tensor_shapes(cfg: dict) -> tuple[dict, dict]:
 
 
 def layer_keys(cfg: dict, i: int) -> list[str]:
+    if cfg.get("arch") == "gemma4":
+        return [k for k in tensor_shapes(cfg)[1] if k.startswith(f"h.{i}.")]
     return [k.format(i=i) for k in tensor_shapes(cfg)[1]]
 
 
@@ -54,6 +83,8 @@ def shard_keys(cfg: dict, start: int, end: int) -> list[str]:
     keys = [k for i in range(start, end) for k in layer_keys(cfg, i)]
     if start == 0:
         keys += ["wte", "wpe"] if gpt2 else ["embed"]
+        if cfg.get("ple_dim"):
+            keys += ["ple_embed.q", "ple_embed.type", "ple_proj.w", "ple_norm"]
     if end == cfg["n_layer"]:
         if gpt2:
             keys += ["ln_f.w", "ln_f.b", "wte"]
@@ -64,8 +95,12 @@ def shard_keys(cfg: dict, start: int, end: int) -> list[str]:
 
 def shard_bytes(cfg: dict, start: int, end: int, bytes_per_param: int = 4) -> int:
     g, per = tensor_shapes(cfg)
-    shapes = {**g, **{k.format(i=i): v for i in range(cfg["n_layer"]) for k, v in per.items()}}
-    return sum(int(np.prod(shapes[k])) for k in shard_keys(cfg, start, end)) * bytes_per_param
+    if cfg.get("arch") == "gemma4":
+        shapes = {**g, **per}
+    else:
+        shapes = {**g, **{k.format(i=i): v for i in range(cfg["n_layer"]) for k, v in per.items()}}
+    raw = {"ple_embed.q"}  # stays quantized: ~1 byte per weight
+    return sum(int(np.prod(shapes[k])) * (1 if k in raw else bytes_per_param) for k in shard_keys(cfg, start, end))
 
 
 class DictSource:
@@ -171,15 +206,19 @@ def _rope(x: np.ndarray, pos: int, inv: np.ndarray) -> np.ndarray:
     return x * cos + rot * sin
 
 
-def _attend(q, k, v, pos):
-    """q: [H, T, hd], k/v: [KV, S, hd] -> [T, H*hd], causal, grouped-query."""
+def _attend(q, k, v, pos, scale=None, window=None):
+    """q: [H, T, hd], k/v: [KV, S, hd] -> [T, H*hd], causal, grouped-query. window: each token
+    sees only that many most recent positions (sliding-window layers)."""
     H, T, hd = q.shape
     groups = H // k.shape[0]
     if groups > 1:
         k, v = np.repeat(k, groups, axis=0), np.repeat(v, groups, axis=0)
     S = k.shape[1]
-    att = q @ k.transpose(0, 2, 1) / np.sqrt(hd)
-    mask = np.arange(S)[None, :] > (pos + np.arange(T))[:, None]
+    att = q @ k.transpose(0, 2, 1) * (1 / np.sqrt(hd) if scale is None else scale)
+    at = (pos + np.arange(T))[:, None]
+    mask = np.arange(S)[None, :] > at
+    if window:
+        mask |= np.arange(S)[None, :] <= at - window
     att = np.where(mask[None], -1e30, att)
     att = np.exp(att - att.max(-1, keepdims=True))
     att /= att.sum(-1, keepdims=True)
@@ -199,7 +238,10 @@ class Shard:
         self.cfg, self.w, self.start, self.end = cfg, tensors, start, end
         self.first, self.last = start == 0, end == cfg["n_layer"]
         self.llama = cfg.get("arch", "gpt2") == "llama"
+        self.gemma = cfg.get("arch") == "gemma4"
         self.inv_freq = rope_inv_freq(cfg) if self.llama else None
+        if self.gemma:
+            self._gemma4_setup()
         self.caches: OrderedDict[str, dict] = OrderedDict()
         self.gpu = None  # optional gpu.GPU holding the weight matrices (see use_gpu)
         self.cpu_part: dict[str, np.ndarray] = {}  # columns the CPU computes alongside the GPU
@@ -210,7 +252,7 @@ class Shard:
         cpu_share > 0 keeps that share of each matrix's columns on the CPU, which computes them
         while the GPU does the rest (both at once, so a step takes the slower of the two)."""
         names = [n for n, t in self.w.items() if t.ndim == 2 and (n.endswith(".w") or n == "lm_head")]
-        tied = None if "lm_head" in self.w or not self.last else "embed" if self.llama else "wte"
+        tied = None if "lm_head" in self.w or not self.last else "embed" if self.llama or self.gemma else "wte"
         mats = [(n, lambda n=n: self.w.pop(n)) for n in names] + ([(tied + "^T", lambda: self.w[tied].T)] if tied else [])
         self.cpu_part = {}
         for name, take in mats:
@@ -285,6 +327,126 @@ class Shard:
             head = w["lm_head"] if "lm_head" in w else w[tied].T
             return (h @ _f32(head))[0].astype(np.float32)
         return x
+
+    def forward_ex(self, job: str, t: dict, pos: int) -> dict:
+        """forward() for a step's tensors {"x": ..., extras}; returns what goes to the next device
+        ({"x": hidden or logits, extras}). Only Gemma 4 sends extras (see _gemma4_forward)."""
+        if self.gemma:
+            return self._gemma4_forward(job, t, pos)
+        return {"x": self.forward(job, t["x"], pos)}
+
+    def _job_cache(self, job: str, pos: int) -> dict:
+        cache = self.caches.pop(job, None)
+        if cache is None or cache["len"] != pos:
+            if pos != 0:
+                raise ValueError(f"no KV cache for job {job} at position {pos}")
+            cache = {"len": 0, "kv": {}}
+        self.caches[job] = cache
+        while len(self.caches) > self.MAX_JOBS:
+            self.caches.popitem(last=False)
+        return cache
+
+    def _head(self, h: np.ndarray, tied: str) -> np.ndarray:
+        name = "lm_head" if self.gpu is not None and self.gpu.has("lm_head") else tied + "^T"
+        if self.gpu is not None and self.gpu.has(name):
+            return self._gpu_mm(h, [name])[0][0].astype(np.float32)
+        head = self.w["lm_head"] if "lm_head" in self.w else self.w[tied].T
+        return (h @ _f32(head))[0].astype(np.float32)
+
+    # ---------- Gemma 4
+    # Per layer: sliding-window or full attention (each with its own head size and key/value
+    # heads), q/k/v RMS norms, no 1/sqrt(d) scaling, norms after attention and after the GELU
+    # MLP, a per-layer embedding (PLE) mixed in, and a learned output scale. The last
+    # n_kv_shared layers compute no keys/values: they reuse those of the last earlier layer of
+    # the same kind. Between devices travel the PLE inputs of the layers still to come and, when
+    # a later device has a shared layer whose source is here, this step's source keys/values.
+
+    def _gemma4_setup(self) -> None:
+        c = self.cfg
+        hd, hds = c["head_dim"], c["head_dim_swa"]
+        self.inv_full = 1.0 / (c["rope_theta"] ** (np.arange(0, hd, 2, dtype=np.float64) / hd))
+        f = c.get("rope_factors") or []
+        if len(f) == hd // 2:  # "proportional" RoPE: huge factors switch rotation off for those pairs
+            self.inv_full = self.inv_full / np.asarray(f, np.float64)
+        self.inv_swa = 1.0 / (c["rope_theta_swa"] ** (np.arange(0, hds, 2, dtype=np.float64) / hds))
+        L = c["n_layer"]
+        first_shared = L - c.get("n_kv_shared", 0)
+        self.kv_src = {i: max(j for j in range(first_shared) if c["swa"][j] == c["swa"][i]) for i in range(first_shared, L)}
+        later = [i for i in self.kv_src if i >= self.end]
+        self.send_kv = {self.kv_src[i] for i in later}  # sources a later device needs (from here or passed through)
+        self._step_kv: dict[int, tuple] = {}
+
+    def _ple(self, ids: np.ndarray, x: np.ndarray) -> np.ndarray:
+        """Per-layer inputs for every layer: [T, n_layer, ple_dim]."""
+        from gguf import GGMLQuantizationType, quants
+
+        c, w = self.cfg, self.w
+        L, P, D = c["n_layer"], c["ple_dim"], c["n_embd"]
+        kind = GGMLQuantizationType(int(w["ple_embed.type"][0]))
+        rows = np.asarray(quants.dequantize(w["ple_embed.q"][ids], kind), np.float32).reshape(len(ids), L, P) * np.sqrt(P)
+        proj = self._mms(x, ["ple_proj.w"])[0].reshape(len(ids), L, P) * D ** -0.5
+        return (_rmsnorm(proj, w["ple_norm"], c["rms_eps"]) + rows) * 2 ** -0.5
+
+    def _gemma4_forward(self, job: str, t: dict, pos: int) -> dict:
+        c, w = self.cfg, self.w
+        cache = self._job_cache(job, pos)
+        x, ple = t["x"], None
+        if self.first:
+            ids = x.astype(np.int64)
+            x = _f32(w["embed"][ids]) * np.float32(np.sqrt(c["n_embd"]))
+            if c.get("ple_dim"):
+                ple = self._ple(ids, x)
+        else:
+            x = x.astype(np.float32)
+            ple = t["ple"].astype(np.float32) if "ple" in t else None
+            for j in {int(k[4:]) for k in t if k.startswith("kvk.")}:  # an earlier device's shared-layer source
+                self._cache(cache["kv"], j, t[f"kvk.{j}"].astype(np.float32), t[f"kvv.{j}"].astype(np.float32))
+        self._step_kv = {}
+        for i in range(self.start, self.end):
+            x = self._gemma4_block(i, x, pos, cache["kv"], None if ple is None else ple[:, i - self.start])
+        cache["len"] = pos + x.shape[0]
+        if self.last:
+            h = _rmsnorm(x[-1:], w["norm_f"], c["rms_eps"])
+            logits = self._head(h, "embed")
+            if c.get("softcap"):
+                logits = np.tanh(logits / c["softcap"]) * c["softcap"]
+            return {"x": logits}
+        out = {"x": x}
+        if ple is not None:
+            out["ple"] = ple[:, self.end - self.start:].astype(np.float16)
+        for j in self.send_kv:
+            k, v = self._step_kv.get(j) or (t.get(f"kvk.{j}"), t.get(f"kvv.{j}"))
+            if k is not None:
+                out[f"kvk.{j}"], out[f"kvv.{j}"] = k, v
+        return out
+
+    def _gemma4_block(self, i: int, x: np.ndarray, pos: int, kv: dict, ple_i) -> np.ndarray:
+        w, p, c = self.w, f"h.{i}.", self.cfg
+        swa, eps, H, T = c["swa"][i], c["rms_eps"], c["n_head"], x.shape[0]
+        hd, KV, inv = (c["head_dim_swa"], c["n_kv_heads"][i], self.inv_swa) if swa else (c["head_dim"], c["n_kv_heads"][i], self.inv_full)
+        h = _rmsnorm(x, w[p + "attn_norm"], eps)
+        shared = i in self.kv_src
+        names = [p + "q.w"] + ([] if shared else [p + "k.w"] + ([] if c["k_eq_v"][i] else [p + "v.w"]))
+        outs = self._mms(h, names)
+        q = _rope(_rmsnorm(outs[0].reshape(T, H, hd).transpose(1, 0, 2), w[p + "q_norm"], eps), pos, inv)
+        if shared:
+            k, v = kv[self.kv_src[i]]
+        else:
+            kr = outs[1].reshape(T, KV, hd).transpose(1, 0, 2)
+            vr = kr if c["k_eq_v"][i] else outs[2].reshape(T, KV, hd).transpose(1, 0, 2)
+            k = _rope(_rmsnorm(kr, w[p + "k_norm"], eps), pos, inv).astype(np.float32)
+            v = (vr / np.sqrt((vr * vr).mean(-1, keepdims=True) + eps)).astype(np.float32)
+            if i in self.send_kv:
+                self._step_kv[i] = (k, v)
+            k, v = self._cache(kv, i, k, v)
+        a = _attend(q, k, v, pos, scale=1.0, window=c["window"] if swa else None)
+        x = x + _rmsnorm(self._mms(a, [p + "o.w"])[0], w[p + "post_attn_norm"], eps)
+        g, u = self._mms(_rmsnorm(x, w[p + "mlp_norm"], eps), [p + "gate.w", p + "up.w"])
+        x = x + _rmsnorm(self._mms(_gelu(g) * u, [p + "down.w"])[0], w[p + "post_mlp_norm"], eps)
+        if ple_i is not None:
+            g = _gelu(self._mms(x, [p + "ple_gate.w"])[0]) * ple_i
+            x = x + _rmsnorm(self._mms(g, [p + "ple_out.w"])[0], w[p + "ple_post_norm"], eps)
+        return (x * _f32(w[p + "out_scale"])).astype(np.float32)
 
     def drop(self, job: str) -> None:
         self.caches.pop(job, None)

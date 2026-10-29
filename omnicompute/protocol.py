@@ -19,7 +19,7 @@ import struct
 
 import numpy as np
 
-DTYPES = {"float32": np.float32, "int32": np.int32, "float16": np.float16}
+DTYPES = {"float32": np.float32, "int32": np.int32, "float16": np.float16, "uint8": np.uint8}  # uint8: quantized rows
 
 
 def pack(header: dict, payload: bytes = b"") -> bytes:

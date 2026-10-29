@@ -258,7 +258,7 @@ class Worker:
                 raise RuntimeError("paused by its usage limit")
             t0 = time.perf_counter()
             async with self._busy:
-                y = await asyncio.to_thread(_limited, info["cores"], shard.forward, h["job"], decode_tensors(payload)["x"], h["pos"])
+                out = await asyncio.to_thread(_limited, info["cores"], shard.forward_ex, h["job"], decode_tensors(payload), h["pos"])
             self.steps += 1
             busy = time.perf_counter() - t0
             h = {**h, "timings": h.get("timings", []) + [[self.node.node_id, round(busy, 5)]]}
@@ -271,10 +271,10 @@ class Worker:
             return
         if h["hop"] + 1 < len(h["route"]):
             nxt = h["route"][h["hop"] + 1]["node"]
-            await self.node.notify(nxt, {**h, "hop": h["hop"] + 1}, encode_tensors({"x": y}))
+            await self.node.notify(nxt, {**h, "hop": h["hop"] + 1}, encode_tensors(out))
         else:
             await self.node.notify(h["reply_to"], {"op": "result", "req": h["req"], "timings": h["timings"]},
-                                   encode_tensors({"logits": y}))
+                                   encode_tensors({"logits": out["x"]}))
 
 
 def _limited(cores, fn, *args):

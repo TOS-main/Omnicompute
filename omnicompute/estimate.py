@@ -15,10 +15,13 @@ DIRECT_HOP_MS = 8.0  # typical one-way latency between two devices on a direct U
 DEFAULT_RTT_MS = 40.0
 
 
-def usable_workers(workers: list[dict]) -> list[dict]:
-    """Workers that may get layers, with their speed scaled by their usage limit."""
+def usable_workers(workers: list[dict], cfg: dict | None = None) -> list[dict]:
+    """Workers that may get layers, with their speed scaled by their usage limit. Models the
+    browser worker can't run yet (cfg "native_only", e.g. Gemma 4) use apps and computers only."""
+    native_only = bool(cfg and cfg.get("native_only"))
     return [dict(w, score=w.get("score", 1.0) * w.get("limit", 100) / 100) for w in workers
-            if w.get("role", "worker") == "worker" and w.get("limit", 100) > 0]
+            if w.get("role", "worker") == "worker" and w.get("limit", 100) > 0
+            and not (native_only and w.get("kind") == "browser")]
 
 
 def score_plan(cfg: dict, plan: list, by_id: dict) -> dict:
@@ -47,8 +50,10 @@ def score_plan(cfg: dict, plan: list, by_id: dict) -> dict:
 
 def best_plan(cfg: dict, workers: list[dict]) -> tuple[list, dict]:
     """(plan, estimate) using the subset of devices with the best estimated speed."""
-    usable = usable_workers(workers)
+    usable = usable_workers(workers, cfg)
     if not usable:
+        if cfg.get("native_only") and usable_workers(workers):
+            raise RuntimeError("this model runs on computers and the Android app only, not in browsers yet")
         raise RuntimeError("no devices are contributing (or all are paused by their usage limit)")
     by_id = {w["node_id"]: w for w in usable}
     forced = [w for w in usable if (w.get("limits") or {}).get("always")]
@@ -79,5 +84,5 @@ def estimate(cfg: dict, workers: list[dict], disk_bytes: int | None = None) -> d
         out["problem"] = str(e)
         return out
     used = {n for n, _, _ in plan}
-    out.update(est, fits=True, standby=[w["node_id"] for w in usable_workers(workers) if w["node_id"] not in used])
+    out.update(est, fits=True, standby=[w["node_id"] for w in usable_workers(workers, cfg) if w["node_id"] not in used])
     return out

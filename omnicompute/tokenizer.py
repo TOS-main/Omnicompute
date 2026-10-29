@@ -114,17 +114,34 @@ class HFTokenizer:
         if chat and self.template:
             messages = text if isinstance(text, list) else [{"role": "system", "content": DEFAULT_SYSTEM},
                                                             {"role": "user", "content": text}]
-            return self.tok.encode(self.apply_chat_template(messages), add_special_tokens=False).ids
+            try:
+                prompt = self.apply_chat_template(messages)
+            except Exception as e:  # noqa: BLE001 - a template using something jinja2 here lacks
+                prompt = self.fallback_chat(messages)
+                if prompt is None:
+                    raise
+                import logging
+
+                logging.getLogger("omnicompute.tokenizer").warning("chat template failed (%s); using the plain format", e)
+            return self.tok.encode(prompt, add_special_tokens=False).ids
         return self.tok.encode(_flatten(text)).ids
 
     def decode(self, ids: list[int]) -> str:
         return self.tok.decode(ids, skip_special_tokens=True)
 
+    def fallback_chat(self, messages: list[dict]) -> str | None:
+        """The chat format written out by hand, for model families we know (None otherwise)."""
+        if self.tok.token_to_id("<|turn>") is not None:  # Gemma 4
+            turns = "".join(f"<|turn>{m.get('role', 'user')}\n{m.get('content', '')}<turn|>\n" for m in messages)
+            return f"{self.bos}{turns}<|turn>model\n"
+        return None
+
 
 class GGUFTokenizer(HFTokenizer):
     """The vocabulary, merges and chat template stored inside a GGUF file."""
 
-    END_TOKENS = ("<|im_end|>", "<|eot_id|>", "<|end_of_text|>", "<|endoftext|>", "<|end|>", "</s>", "<end_of_turn>")
+    END_TOKENS = ("<|im_end|>", "<|eot_id|>", "<|end_of_text|>", "<|endoftext|>", "<|end|>", "</s>", "<end_of_turn>",
+                  "<turn|>", "<eos>")
 
     def __init__(self, source):
         from . import bpe
@@ -144,11 +161,16 @@ class GGUFTokenizer(HFTokenizer):
             tok = bpe.BPE(vocab, scores=[float(s) for s in m("tokenizer.ggml.scores", [])], kind="spm",
                           special=special, prefix_space=bool(m("tokenizer.ggml.add_space_prefix", True)),
                           unk_id=m("tokenizer.ggml.unknown_token_id"))
+        elif model == "gemma4":  # SentencePiece-style pieces, merged by rank across whole lines
+            merges = [tuple(str(x).split(" ", 1)) for x in m("tokenizer.ggml.merges", [])]
+            tok = bpe.BPE(vocab, merges, kind="spm", special=special, prefix_space=False, whole_lines=True)
         else:
             raise ValueError(f"GGUF tokenizer '{model}' is not supported yet")
         bos_id, eos_id = m("tokenizer.ggml.bos_token_id"), m("tokenizer.ggml.eos_token_id")
         add_bos = m("tokenizer.ggml.add_bos_token", model == "llama")
         self.tok = _PureTokenizer(tok, bos_id if add_bos and bos_id is not None else None)
+        if model == "gemma4":  # the compiled tokenizer is much faster on long prompts, when it's there
+            self.tok = _fast_gemma4(vocab, merges, special, bos_id if add_bos else None) or self.tok
         self.bos = tokens[bos_id] if bos_id is not None and bos_id < len(tokens) else ""
         self.eos = tokens[eos_id] if eos_id is not None and eos_id < len(tokens) else ""
         self.template = m("tokenizer.chat_template")
@@ -156,6 +178,23 @@ class GGUFTokenizer(HFTokenizer):
         ids |= {special[t] for t in self.END_TOKENS if t in special}
         self.eos_ids = ids
         self.has_chat_template = bool(self.template)
+
+
+def _fast_gemma4(vocab: dict, merges: list, special: dict, bos_id):
+    """Gemma 4's tokenizer on the `tokenizers` package (None when it isn't installed)."""
+    try:
+        from tokenizers import AddedToken, Regex, Tokenizer, decoders, models, normalizers, pre_tokenizers, processors
+    except ImportError:
+        return None
+    t = Tokenizer(models.BPE(vocab, merges, byte_fallback=True, fuse_unk=False))
+    t.normalizer = normalizers.Replace(" ", "▁")
+    t.pre_tokenizer = pre_tokenizers.Split(Regex("\n+"), "isolated")
+    t.decoder = decoders.Sequence([decoders.Replace("▁", " "), decoders.ByteFallback(), decoders.Fuse()])
+    t.add_special_tokens([AddedToken(s, special=True, normalized=False) for s in special])
+    if bos_id is not None:
+        bos = next((s for s, i in special.items() if i == bos_id), None) or next(s for s, i in vocab.items() if i == bos_id)
+        t.post_processor = processors.TemplateProcessing(single=f"{bos} $A", special_tokens=[(bos, bos_id)])
+    return t
 
 
 def _flatten(text) -> str:

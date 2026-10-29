@@ -6,7 +6,10 @@ Quantized tensors (Q4_0, Q4_K, Q5_K, Q6_K, Q8_0, ...) are expanded to float16 as
 layers are sent, using the `gguf` package's NumPy decoders, so the file stays small on disk and
 in the download, while devices compute as they do for safetensors models.
 
-Supported architectures: llama (Llama 2/3.x, Mistral, TinyLlama, SmolLM), qwen2, qwen3, phi3.
+Supported architectures: llama (Llama 2/3.x, Mistral, TinyLlama, SmolLM), qwen2, qwen3, phi3,
+and gemma4 (dense Gemma 4: E2B, E4B, 31B; see model.py for its layout). Gemma 4's per-layer
+embedding table is the biggest tensor in the file but is only ever looked up by row, so it
+travels and stays in its quantized form ("ple_embed.q") instead of being expanded.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-ARCHS = {"llama", "mistral", "qwen2", "qwen3", "phi3"}
+ARCHS = {"llama", "mistral", "qwen2", "qwen3", "phi3", "gemma4"}
 
 
 def _field(reader, key, default=None):
@@ -39,6 +42,8 @@ def gguf_config(reader, name: str, max_ctx: int = 8192) -> dict:
     a = lambda k, d=None: _field(reader, f"{arch}.{k}", d)  # noqa: E731
     D, H = int(a("embedding_length")), int(a("attention.head_count"))
     names = {t.name for t in reader.tensors}
+    if arch == "gemma4":
+        return _gemma4_config(reader, a, name, names, D, H, max_ctx)
     tokens = _field(reader, "tokenizer.ggml.tokens") or []
     rs = None
     t = next((t for t in reader.tensors if t.name == "rope_freqs.weight"), None)
@@ -66,6 +71,40 @@ def gguf_config(reader, name: str, max_ctx: int = 8192) -> dict:
     }
 
 
+def _gemma4_config(reader, a, name, names, D, H, max_ctx) -> dict:
+    if any(".ffn_gate_inp." in n for n in names):
+        raise ValueError("Gemma 4 mixture-of-experts models (26B-A4B) are not supported yet; E2B, E4B and 31B are")
+    L = int(a("block_count"))
+    per = lambda v: [int(x) for x in v] if isinstance(v, list) else [int(v)] * L  # noqa: E731
+    swa = [bool(x) for x in (a("attention.sliding_window_pattern") or [True] * L)]
+    t = next((t for t in reader.tensors if t.name == "rope_freqs.weight"), None)
+    factors = [] if t is None or getattr(t, "data", None) is None else [float(x) for x in np.asarray(t.data, np.float32).ravel()]
+    ctx = int(a("context_length", 131072))
+    tokens = _field(reader, "tokenizer.ggml.tokens") or []
+    shared = int(a("attention.shared_kv_layers", 0) or 0)
+    return {
+        "arch": "gemma4", "hf_type": "gemma4", "name": name, "tokenizer": "gguf", "native_only": True,
+        "n_layer": L, "n_embd": D, "n_head": H, "vocab": int(a("vocab_size") or len(tokens)),
+        "head_dim": int(a("attention.key_length")), "head_dim_swa": int(a("attention.key_length_swa")),
+        "n_kv_heads": per(a("attention.head_count_kv")), "ffns": per(a("feed_forward_length")),
+        "swa": swa, "window": int(a("attention.sliding_window", 512)),
+        "rope_theta": float(a("rope.freq_base", 1e6)), "rope_theta_swa": float(a("rope.freq_base_swa", 1e4)),
+        "rope_factors": factors, "rms_eps": float(a("attention.layer_norm_rms_epsilon", 1e-6)),
+        "softcap": float(a("final_logit_softcapping", 0.0) or 0.0),
+        "ple_dim": int(a("embedding_length_per_layer_input", 0) or 0), "n_kv_shared": shared,
+        "k_eq_v": [f"blk.{i}.attn_k.weight" in names and f"blk.{i}.attn_v.weight" not in names for i in range(L)],
+        "tie_embeddings": "output.weight" not in names,
+        "n_ctx": ctx, "ctx_default": min(ctx, max_ctx),
+    }
+
+
+GEMMA4_PARTS = {"attn_norm": "attn_norm", "q_norm": "attn_q_norm", "k_norm": "attn_k_norm",
+                "post_attn_norm": "post_attention_norm", "mlp_norm": "ffn_norm", "post_mlp_norm": "post_ffw_norm",
+                "ple_post_norm": "post_norm", "out_scale": "layer_output_scale",
+                "q": "attn_q", "k": "attn_k", "v": "attn_v", "o": "attn_output", "gate": "ffn_gate", "up": "ffn_up",
+                "down": "ffn_down", "ple_gate": "inp_gate", "ple_out": "proj"}
+
+
 class GGUFSource:
     def __init__(self, path: str | Path, name: str | None = None, dtype=np.float16):
         from gguf import GGUFReader
@@ -90,14 +129,36 @@ class GGUFSource:
             w = quants.dequantize(np.asarray(t.data), t.tensor_type)
         return w.reshape([int(n) for n in reversed(t.shape)]) if w.ndim and w.size == np.prod(t.shape) else w
 
+    def raw(self, name: str) -> tuple[np.ndarray, int]:
+        """A tensor's bytes as stored (one row per output), and its GGML type."""
+        t = self.tensors[name]
+        return np.ascontiguousarray(np.asarray(t.data).reshape(int(t.shape[-1]), -1).view(np.uint8)), int(t.tensor_type)
+
     def get(self, name: str) -> np.ndarray:
+        if name in ("ple_embed.q", "ple_embed.type"):  # Gemma 4: kept quantized (see the module notes)
+            q, kind = self.raw("per_layer_token_embd.weight")
+            return q if name == "ple_embed.q" else np.array([kind], np.int32)
         w = np.asarray(self._get(name), np.float32)
         if w.ndim >= 2 and self.dtype == np.float16:
             return np.ascontiguousarray(np.clip(w, -65504, 65504).astype(np.float16))
         return np.ascontiguousarray(w)
 
+    def _gemma4(self, name: str) -> np.ndarray:
+        glob = {"embed": "token_embd.weight", "norm_f": "output_norm.weight", "ple_norm": "per_layer_proj_norm.weight"}
+        if name in glob:
+            return self._t(glob[name])
+        if name == "lm_head":
+            return self._t("output.weight").T
+        if name == "ple_proj.w":
+            return self._t("per_layer_model_proj.weight").T
+        _, i, part = name.split(".", 2)
+        w = self._t(f"blk.{i}.{GEMMA4_PARTS[part.removesuffix('.w')]}.weight")
+        return w.T if part.endswith(".w") else w.reshape(-1)
+
     def _get(self, name: str) -> np.ndarray:
         c = self.cfg
+        if c["arch"] == "gemma4":
+            return self._gemma4(name)
         if name == "embed":
             return self._t("token_embd.weight")
         if name == "norm_f":

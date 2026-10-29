@@ -323,7 +323,7 @@ function applyModel(cfg) {
     refreshModelInfo();
   }
   $("ctx-hint").textContent = `Model limit: ${limit.toLocaleString()} tokens. Longer contexts use more memory on every device.`;
-  $("modelline").textContent = `${cfg.name} · ${cfg.n_layer} layers · ${cfg.arch === "llama" ? cfg.hf_type || "llama" : "gpt2"}`;
+  $("modelline").textContent = `${cfg.name} · ${cfg.n_layer} layers · ${cfg.hf_type || cfg.arch || "gpt2"}`;
 }
 
 let lastCtxUse = store.get("ctxuse", 0);
@@ -581,7 +581,7 @@ async function refreshModelInfo() {
       el("div", { class: "row space" }, el("div", {}, el("div", { class: "big-num" }, c.name.split("/").pop()), el("div", { class: "muted small" }, c.name)),
         c.tokenizer === "bytes" ? el("span", { class: "badge relay" }, "test model, random weights") : el("span", { class: "badge on" }, m.chat_template ? "chat model" : "text model")),
       el("div", { class: "kv" }, stat(c.n_layer, "layers"), stat(fmtNum(Math.round((e && e.memory_bytes_total || 0) / 4)), "parameters"),
-        stat(c.n_ctx.toLocaleString(), "max context"), stat(c.arch === "llama" ? c.hf_type || "llama" : "gpt2", "architecture")),
+        stat(c.n_ctx.toLocaleString(), "max context"), stat(c.hf_type || c.arch || "gpt2", "architecture")),
       e ? estimateView(e, "Expected speed on your current devices") : null);
   }
   const d = m.download, busy = d && ["starting", "downloading", "loading"].includes(d.state);

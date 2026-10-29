@@ -62,7 +62,7 @@ class BPE:
     def __init__(self, vocab: dict[str, int], merges: list[tuple[str, str]] | None = None,
                  scores: list[float] | None = None, kind: str = "byte", split: str | None = GPT2_SPLIT,
                  special: dict[str, int] | None = None, prefix_space: bool = True, byte_fallback: bool = True,
-                 ignore_merges: bool = False, unk_id: int | None = None):
+                 ignore_merges: bool = False, unk_id: int | None = None, whole_lines: bool = False):
         self.vocab = vocab
         self.inv = {i: t for t, i in vocab.items()}
         for t, i in (special or {}).items():
@@ -77,6 +77,7 @@ class BPE:
         self.byte_fallback = byte_fallback
         self.ignore_merges = ignore_merges
         self.unk_id = unk_id
+        self.whole_lines = whole_lines  # Gemma 4: merges run across words, only newlines split
         self._special_re = (re.compile("|".join(re.escape(t) for t in sorted(self.special, key=len, reverse=True)))
                             if self.special else None)
         self._cache: dict[str, list[int]] = {}
@@ -109,6 +110,9 @@ class BPE:
         text = text.replace(" ", "▁")
         if first and self.prefix_space:
             text = "▁" + text
+        if self.whole_lines:
+            return [i for w in re.findall(r"[^\n]+|\n+", text)
+                    for i in ([self.vocab[w]] if w[0] == "\n" and w in self.vocab else self._word(w))]
         # SentencePiece never merges across a word start, so each word is merged on its own
         return [i for w in re.findall(r"▁*[^▁]+|▁+", text) for i in self._word(w)]
 
