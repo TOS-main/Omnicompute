@@ -419,10 +419,13 @@ async def test_termux_host_script_needs_the_full_key(model_file):
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(f"{base}/termux.sh?k={hub.contribute_key}") as r:
-                assert r.status == 401  # a contributor can't take over hosting
+                assert r.status == 401  # a contribute key can't take over hosting...
+            async with s.get(f"{base}/termux.sh?c={hub.contribute_key}") as r:
+                worker = await r.text()  # ...but can make the phone a native worker
             async with s.get(f"{base}/termux.sh?k={KEY}") as r:
                 text = await r.text()
-        assert f'KEY="{KEY}"' in text and f'HUB="{base}"' in text and "--no-worker" in text
+        assert f'KEY="{KEY}"' in text and f'HUB="{base}"' in text and 'MODE="host"' in text
+        assert f'KEY="{hub.contribute_key}"' in worker and 'MODE="contribute"' in worker and KEY not in worker
     finally:
         for x in nodes:
             await x.close()

@@ -70,8 +70,10 @@ A phone stays on with the screen off, so it can host instead of a laptop that sl
 **Termux** (from F-Droid or GitHub), then paste the line `edgemesh links` prints on the current
 main computer: `curl -fsSL "http://MAIN:8000/termux.sh?k=KEY" | sh`. It installs EdgeMesh in
 Termux, keeps your mesh key (so only the address in your links changes), starts hosting with an
-https `--public` link, and holds a wake lock. The phone only coordinates (`--no-worker`), which
-uses little battery; the computers do the model's work. `edgemesh-host` starts it again,
+https `--public` link, and holds a wake lock. By default the phone only coordinates
+(`--no-worker`), which uses little battery; the setup can also let it compute on the side, capped
+at 50% (`edgemesh-host --compute` / `--no-compute`). Other phones can compute natively in Termux
+too, which is usually faster than the browser page: `curl -fsSL "http://MAIN:8000/termux.sh?c=CONTRIBUTE-KEY" | sh`. `edgemesh-host` starts it again,
 `edgemesh-host-stop` stops it, and with the Termux:Boot app it starts after a restart. Set
 Termux's battery setting to Unrestricted. Hosting downloads the model to the phone, so it needs
 the free space.

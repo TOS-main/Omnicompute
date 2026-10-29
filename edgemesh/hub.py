@@ -328,11 +328,16 @@ class Hub:
         return web.Response(text=text, content_type="text/plain")
 
     async def _termux(self, request: web.Request) -> web.Response:
-        """Moves hosting to an Android phone (Termux) with the same mesh key; needs the full key."""
-        if not self._authorized(request):
-            raise web.HTTPUnauthorized(text="wrong mesh key")
+        """Android phones in Termux: ?k= (full key) moves hosting there with the same mesh key;
+        ?c= (contribute key) makes the phone a native worker, which computes faster than a browser."""
+        if self._authorized(request):
+            key, mode = self.secret, "host"
+        elif hmac.compare_digest(request.query.get("c", ""), self.contribute_key):
+            key, mode = self.contribute_key, "contribute"
+        else:
+            raise web.HTTPUnauthorized(text="wrong key")
         text = (resources.files("edgemesh").joinpath("installers", "termux-host.sh").read_text(encoding="utf-8")
-                .replace("@ORIGIN@", self._origin(request)).replace("@KEY@", self.secret))
+                .replace("@ORIGIN@", self._origin(request)).replace("@KEY@", key).replace("@MODE@", mode))
         return web.Response(text=text, content_type="text/plain")
 
     async def _package(self, request: web.Request) -> web.Response:
