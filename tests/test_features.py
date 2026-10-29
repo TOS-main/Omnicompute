@@ -454,6 +454,10 @@ def test_cores_flag_is_saved_and_scales_the_score(tmp_path):
 
 
 def test_install_sh_from_github_downloads_the_repo(tmp_path):
+    import pytest
+
+    if sys.platform == "win32":
+        pytest.skip("the Mac/Linux installer")
     bin_ = tmp_path / "bin"
     bin_.mkdir()
     (bin_ / "curl").write_text(f'#!/bin/sh\necho "$@" > "{tmp_path}/curl-args"\nexit 1\n')
