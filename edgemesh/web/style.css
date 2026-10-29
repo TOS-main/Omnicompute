@@ -184,3 +184,4 @@ button.primary.stop { background: var(--bad); border-color: var(--bad); }
 details.more { margin: 6px 0; }
 details.more > summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
 .bad-text { color: var(--bad, #e5484d); }
+.cores button.on { border-color: var(--accent, #6aa0ff); color: var(--accent, #6aa0ff); font-weight: 600; }

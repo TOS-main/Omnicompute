@@ -43,6 +43,9 @@ class Orchestrator:
         self.busy: dict[str, float] = {}  # node -> seconds spent computing in the current run
         self.helped: dict[str, dict] = {}  # node -> {"answers", "tokens", "compute_s"} since the hub started
         self.share_output = True  # show the answer on the devices computing it
+        # ...including helpers on the contribute-only link (people outside the mesh); off, so a
+        # public contribute link never shows anyone your chats
+        self.share_with_helpers = False
 
     def set_model(self, source) -> None:
         """Switch models; devices receive the new layers on the next generation."""
@@ -192,7 +195,7 @@ class Orchestrator:
             return
         info = {w["node_id"]: w["info"] for w in self.list_workers()}
         for node, _, _ in self.plan:
-            if node in info and not info[node].get("hub_machine"):
+            if node in info and not info[node].get("hub_machine") and (self.share_with_helpers or not info[node].get("contributor")):
                 asyncio.ensure_future(self.endpoint.notify(node, {"op": "live", "text": text[-4000:], "done": done}))
 
     def _credit(self, tokens: int) -> list[dict]:

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">EdgeMesh</string>
+    <string name="channel">Hosting</string>
+    <string name="hosting">Hosting your AI mesh</string>
+    <string name="hosting_text">Your devices can reach it from any network. Tap to open.</string>
+    <string name="stop">Stop</string>
+    <string name="share">Share contribute link</string>
+    <string name="share_full">Share my own link (full access)</string>
+    <string name="compute">Also compute on this phone</string>
+    <string name="boot">Start when the phone starts</string>
+    <string name="battery">Don\'t let Android pause it</string>
+    <string name="stop_hosting">Stop hosting</string>
+    <string name="use_key">Use an existing mesh key</string>
+    <string name="use_key_text">Paste the mesh key (or full link) of a mesh you already run, and this phone takes over hosting it. Your links and devices keep working.</string>
+    <string name="starting">Starting EdgeMesh…</string>
+</resources>

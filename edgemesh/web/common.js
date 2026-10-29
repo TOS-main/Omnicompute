@@ -57,6 +57,9 @@ async function deviceIdentity() {
 
 const DEFAULT_LIMITS = { cpu: 80, schedule: [], always: false, gpu: true, cores: null, battery: null, charging: null };
 
+// cores a browser worker can use (worker.js keeps one free for the page)
+const browserCores = () => (typeof Worker === "undefined" ? 1 : Math.max(1, Math.min(16, (navigator.hardwareConcurrency || 2) - 1)));
+
 function limitEditor(limits, onChange, opts = {}) {
   const cur = { ...DEFAULT_LIMITS, ...JSON.parse(JSON.stringify(limits || {})) };
   let timer = null;
@@ -90,8 +93,21 @@ function limitEditor(limits, onChange, opts = {}) {
     return el("div", { class: "row wrap" }, check(cur[state], label, (on) => { cur[state] = on ? { ...dflt } : null; draw(); emit(); }), body);
   };
 
+  // cores: one tap, "All" or a few counts up to what the device has
+  const total = opts.cores || null;
+  const coreRow = el("div", { class: "row wrap cores" });
+  const drawCores = () => {
+    const counts = [1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64].filter((n) => !total || n < total);
+    fill(coreRow, el("span", { class: "small muted" }, "Cores"),
+      ...[null, ...counts].map((n) => el("button", { class: "small" + ((cur.cores || null) === n ? " on" : ""), type: "button",
+        "aria-pressed": String((cur.cores || null) === n), onclick: () => { cur.cores = n; drawCores(); emit(); } },
+        n === null ? (total ? `All ${total}` : "All") : String(n))));
+  };
+  drawCores();
+
   return el("div", { class: "limitbox" },
     el("div", { class: "row" }, el("span", { class: "small muted" }, opts.label || "Usage limit"), slider, pct),
+    coreRow,
     el("div", { class: "row wrap" },
       el("button", { class: "small", type: "button", onclick: () => set(100) }, "100%"),
       el("button", { class: "small", type: "button", onclick: () => set(80) }, "80%"),
@@ -99,10 +115,8 @@ function limitEditor(limits, onChange, opts = {}) {
       el("button", { class: "small", type: "button", onclick: () => set(0) }, "Pause"),
       check(cur.always, "Always use", (on) => { cur.always = on; emit(); }, "keep it in the split even when the mesh would be faster without it"),
       check(cur.gpu, "Use GPU", (on) => { cur.gpu = on; emit(); }, "use the graphics chip when it is faster than the CPU")),
-    el("details", { class: "more", open: opts.open || cur.schedule.length || cur.battery || cur.charging || cur.cores ? true : null },
-      el("summary", { class: "small" }, "Cores, battery and time of day"),
-      el("div", { class: "row wrap small" }, "CPU cores", num(cur.cores, 1, 64, 1, (v) => { cur.cores = v; emit(); }, "cores"),
-        el("span", { class: "muted" }, "(blank = the device's default)")),
+    el("details", { class: "more", open: opts.open || cur.schedule.length || cur.battery || cur.charging ? true : null },
+      el("summary", { class: "small" }, "Battery and time of day"),
       powerRule("battery", "On battery:", { cpu: 30, cores: 2 }),
       powerRule("charging", "While charging:", { cpu: 100, cores: null }),
       rows,

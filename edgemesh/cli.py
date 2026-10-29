@@ -58,7 +58,7 @@ def _demo_model() -> str:
 
 async def _run_worker(url: str, key: str, name: str, relay_only: bool, mem_fraction: float, forever: bool = True,
                       cpu: int | None = None, schedule: str | None = None, always: bool | None = None,
-                      hub_machine: bool = False):
+                      hub_machine: bool = False, cores: int | None = None):
     from . import limits as L
     from .node import MeshNode
     from .gpu import open_gpu
@@ -73,8 +73,22 @@ async def _run_worker(url: str, key: str, name: str, relay_only: bool, mem_fract
         overrides["schedule"] = L.parse_schedule(schedule)
     if always is not None:
         overrides["always"] = always
+    if cores:
+        overrides["cores"] = cores
     store = L.LimitStore(HOME / f"limits-{name}.json", overrides)
+    import aiohttp
+
+    fails = 0
     while True:
+        if url.startswith("beacon:") or fails >= 2:  # the host moved (new tunnel or Wi-Fi address)
+            found = await _find_host(key)
+            if found and found != url:
+                print(f"[{name}] the main computer is now at {found}", flush=True)
+                url, fails = found, 0
+            elif url.startswith("beacon:"):
+                print(f"[{name}] waiting for the main computer to come online...", flush=True)
+                await asyncio.sleep(20)
+                continue
         node = MeshNode(name, key, url, info, allow_direct=not relay_only)
         worker = Worker(store, gpu).attach(node)
         worker.on_uninstall = lambda: _uninstall(name)
@@ -86,8 +100,10 @@ async def _run_worker(url: str, key: str, name: str, relay_only: bool, mem_fract
             print(f"[{name}] joined {url}  (CPU {info['cpu_score']} GFLOP/s{gpu_note}, offering {info['mem_mb']} MB, "
                   f"usage limit {cpu_now}% ({why}), public UDP {node.public_addr or 'unknown'})", flush=True)
             watcher = asyncio.ensure_future(worker.watch_schedule())
+            fails = 0
             await node.closed.wait()
-        except (OSError, PermissionError) as e:
+        except (OSError, PermissionError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+            fails += 1
             print(f"[{name}] could not join {url}: {e}", flush=True)
             if isinstance(e, PermissionError):
                 if "key" in str(e):
@@ -104,6 +120,28 @@ async def _run_worker(url: str, key: str, name: str, relay_only: bool, mem_fract
             return
         await asyncio.sleep(3)
         print(f"[{name}] reconnecting...", flush=True)
+
+
+async def _find_host(key: str) -> str | None:
+    """Where the main computer is now, from its beacon: its Wi-Fi address when that answers
+    from here (faster), otherwise its address for other networks."""
+    import aiohttp
+
+    from . import beacon
+
+    info = await beacon.lookup(key)
+    if not info:
+        return None
+    lan = info.get("lan")
+    if lan and lan != info.get("url"):
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as s:
+                async with s.get(lan + "/api/hello") as r:
+                    if r.status == 200:
+                        return lan
+        except Exception:
+            pass
+    return info.get("url")
 
 
 def _uninstall(name: str) -> list[str]:
@@ -222,7 +260,7 @@ async def cmd_host(args) -> None:
         return
     hub.lan_origin = f"http://{_lan_ip()}:{hub.port}"
     lan = f"{hub.lan_origin}/?k={key}"
-    tunnel = None
+    tunnel = hub.tunnel = None
     public = None
     if args.public:
         from . import tunnel as T
@@ -247,25 +285,57 @@ async def cmd_host(args) -> None:
         print(f"  works anywhere, or forward TCP+UDP port {hub.port} on this machine's router.")
     origin = hub.public_origin or hub.lan_origin
     ck = hub.contribute_key
+    from . import beacon
+    from .project import RAW, permanent_link
+
+    if beacon.server():
+        print(f"  Permanent links (they follow this computer to any new address):")
+        print(f"    full:       {permanent_link(key, full=True)}")
+        print(f"    contribute: {permanent_link(ck)}")
     print(f"  Contribute-only link (no chat or settings): {origin}/contribute?c={ck}")
-    print("  Add a computer in one line (it then contributes in the background):")
-    print(f"    Windows PowerShell:  irm \"{origin}/install.ps1?c={ck}\" | iex")
-    print(f"    Mac / Linux:         curl -fsSL \"{origin}/install.sh?c={ck}\" | sh")
+    print("  Add a computer in one line, from any network (it then contributes in the background):")
+    print(f"    Windows PowerShell:  $env:EDGEMESH_CODE=\"{ck}\"; irm {RAW}/edgemesh/installers/install.ps1 | iex")
+    print(f"    Mac / Linux:         curl -fsSL {RAW}/edgemesh/installers/install.sh | EDGEMESH_CODE={ck} sh")
     print(f"  Model: {hub.orchestrator.cfg.get('name')} ({hub.orchestrator.cfg['n_layer']} layers). "
           "Load another from Hugging Face on the web page.\n", flush=True)
     tasks = []
+    publisher = beacon.Publisher(key, lambda: {"url": hub.public_origin or hub.lan_origin, "lan": hub.lan_origin})
+    publisher.start()
+    tasks.append(asyncio.ensure_future(_keep_addresses(hub, args, tunnel)))
     if not args.no_worker:
         tasks.append(asyncio.ensure_future(_run_worker(f"http://127.0.0.1:{hub.port}", key,
                                                        f"{socket.gethostname()[:20]}-host", False, args.mem,
-                                                       cpu=args.cpu, schedule=args.schedule, hub_machine=True)))
+                                                       cpu=args.cpu, schedule=args.schedule, hub_machine=True,
+                                                       cores=args.cores)))
     try:
         await asyncio.Event().wait()
     finally:
+        publisher.stop()
         for t in tasks:
             t.cancel()
-        if tunnel:
-            tunnel.kill()
+        if hub.tunnel:
+            hub.tunnel.kill()
         await hub.close()
+
+
+async def _keep_addresses(hub, args, tunnel) -> None:
+    """Follow a changing Wi-Fi address, and restart the tunnel if it dies; the beacon then
+    tells every device the new address."""
+    from . import tunnel as T
+
+    hub.tunnel = tunnel
+    while True:
+        await asyncio.sleep(30)
+        lan = f"http://{_lan_ip()}:{hub.port}"
+        if lan != hub.lan_origin:
+            print(f"  This computer's Wi-Fi address changed: {lan}/?k={hub.secret}", flush=True)
+            hub.lan_origin = lan
+        if args.public and not args.public_url and (hub.tunnel is None or hub.tunnel.returncode is not None):
+            try:
+                hub.tunnel, hub.public_origin = await T.start(hub.port, HOME)
+                print(f"  New address for other networks: {hub.public_origin}/?k={hub.secret}", flush=True)
+            except Exception as e:
+                log.info("tunnel restart failed: %s", e)
 
 
 CUDA_INDEX = "https://download.pytorch.org/whl/cu126"
@@ -316,13 +386,18 @@ async def cmd_links(args) -> None:
     print(f"  Full link (chat, settings, join):  {origin}/?k={key}")
     ck = contribute_key(key)
     print(f"  Contribute-only link:              {origin}/contribute?c={ck}")
-    print("  Install on another computer (runs in the background, uses its GPU):")
-    print(f"    Windows PowerShell:  irm \"{origin}/install.ps1?c={ck}\" | iex")
-    print(f"    Mac / Linux:         curl -fsSL \"{origin}/install.sh?c={ck}\" | sh")
+    from .project import RAW, permanent_link
+
+    print(f"  Permanent links (they find the main device wherever it is):")
+    print(f"    full:       {permanent_link(key, full=True)}")
+    print(f"    contribute: {permanent_link(ck)}")
+    print("  Install on another computer, from any network (runs in the background, uses its GPU):")
+    print(f"    Windows PowerShell:  $env:EDGEMESH_CODE=\"{ck}\"; irm {RAW}/edgemesh/installers/install.ps1 | iex")
+    print(f"    Mac / Linux:         curl -fsSL {RAW}/edgemesh/installers/install.sh | EDGEMESH_CODE={ck} sh")
     print("  Android phone in Termux, computing natively (faster than the browser page):")
-    print(f"    curl -fsSL \"{origin}/termux.sh?c={ck}\" | sh")
-    print("  Make an Android phone the main computer instead (Termux, same key; it can compute too):")
-    print(f"    curl -fsSL \"{origin}/termux.sh?k={key}\" | sh")
+    print(f"    curl -fsSL {RAW}/edgemesh/installers/termux-host.sh | EDGEMESH_CODE={ck} sh")
+    print("  Make an Android phone the main device instead (Termux, same key; it can compute too):")
+    print(f"    curl -fsSL {RAW}/edgemesh/installers/termux-host.sh | EDGEMESH_KEY={key} sh")
     if port is None:
         print("  (EdgeMesh isn't hosting on this computer right now; the port is 8000 unless it was busy.)")
 
@@ -355,7 +430,7 @@ async def cmd_join(args) -> None:
         sys.exit("The join link needs the mesh key (…/?k=KEY), or pass --key.")
     name = args.name or f"{socket.gethostname()[:20]}-{secrets.token_hex(2)}"
     await _run_worker(url, key, name, args.relay_only, args.mem, cpu=args.cpu, schedule=args.schedule,
-                      always=True if args.always else None)
+                      always=True if args.always else None, cores=args.cores)
 
 
 def cmd_contribute(args) -> None:
@@ -371,7 +446,7 @@ def cmd_contribute(args) -> None:
         background.stop(HOME)
         return
     if not args.url:
-        sys.exit("usage: edgemesh contribute LINK   (or --stop)")
+        sys.exit("usage: edgemesh contribute LINK   (or: creator, to help the project creator's mesh; or --stop)")
     from .node import parse_join_url
 
     url, key = parse_join_url(args.url)
@@ -383,9 +458,16 @@ def cmd_contribute(args) -> None:
         extra += ["--cpu", str(args.cpu)]
     if args.schedule:
         extra += ["--schedule", args.schedule]
+    if args.cores:
+        extra += ["--cores", str(args.cores)]
     from .crypto import is_contribute_key
 
-    link = f"{url}/contribute?c={key}" if is_contribute_key(key) else f"{url}/?k={key}"
+    if url == "beacon:":  # a permanent link or a bare code: keep it, the host's address is looked up
+        from .project import permanent_link
+
+        link = key if is_contribute_key(key) else permanent_link(key, full=True)
+    else:
+        link = f"{url}/contribute?c={key}" if is_contribute_key(key) else f"{url}/?k={key}"
     pid = background.start(link, name, HOME, extra, autostart=not args.no_autostart)
     print(f"EdgeMesh is contributing in the background as '{name}' (process {pid}).")
     print("It starts again when you log in." if not args.no_autostart else "It stops when you log out.")
@@ -461,10 +543,7 @@ def _interactive() -> list[str]:
     return ["host", "--public"] if public.startswith("y") else ["host"]
 
 
-def main(argv: list[str] | None = None) -> None:
-    argv = sys.argv[1:] if argv is None else argv
-    if not argv and sys.stdin.isatty():
-        argv = _interactive()
+def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="edgemesh", description=__doc__.split("\n")[0])
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -503,6 +582,7 @@ def main(argv: list[str] | None = None) -> None:
     for sp in (h, j, b):
         sp.add_argument("--cpu", type=int, help="usage limit in percent (default 80; 0 = paused)")
         sp.add_argument("--schedule", help='time-of-day limits, e.g. "22:00-07:00=100,09:00-17:00=0"')
+        sp.add_argument("--cores", type=int, help=f"CPU cores to use (default all {os.cpu_count()}); change it later on the Devices tab")
 
     r = sub.add_parser("run", help="run a prompt on the mesh")
     r.add_argument("url")
@@ -534,6 +614,14 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("repo", help="e.g. Qwen/Qwen2.5-0.5B-Instruct")
     c.add_argument("--hf-token")
 
+    return p
+
+
+def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv and sys.stdin.isatty():
+        argv = _interactive()
+    p = parser()
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(name)s %(message)s")

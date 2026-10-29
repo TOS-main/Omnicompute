@@ -71,7 +71,8 @@ def total_memory_mb() -> int:
 def worker_info(mem_fraction: float = 0.5, gpu=None) -> dict:
     cpu = float(os.environ.get("EDGEMESH_SCORE") or benchmark())
     info = {"role": "worker", "kind": "native", "platform": f"{platform.system()} {platform.machine()}",
-            "score": cpu, "cpu_score": cpu, "mem_mb": int(total_memory_mb() * mem_fraction)}
+            "score": cpu, "cpu_score": cpu, "mem_mb": int(total_memory_mb() * mem_fraction),
+            "cores_total": os.cpu_count() or 1}
     if gpu is not None:
         info["gpu"] = {"name": gpu.name, "score": gpu.benchmark(), "via": getattr(gpu, "backend", "webgpu")}
     return info
@@ -116,7 +117,9 @@ class Worker:
         if self.node is not None and "cpu_score" in self.node.info:
             gpu = self.use_gpu()
             out["uses"] = "gpu" if gpu else "cpu"
-            out["score"] = self.node.info["gpu"]["score"] if gpu else self.node.info["cpu_score"]
+            total = self.node.info.get("cores_total") or 1
+            share = min(out["cores"], total) / total if out["cores"] else 1  # fewer cores, less speed
+            out["score"] = self.node.info["gpu"]["score"] if gpu else round(self.node.info["cpu_score"] * share, 2)
         return out
 
     async def report_limits(self, force: bool = False) -> None:

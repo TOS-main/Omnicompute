@@ -9,6 +9,7 @@ if (params.get("c")) history.replaceState(null, "", location.pathname); // keep 
 store.set("ckey", ckey);
 
 let ident = null, pw = null;
+const follower = hostFollower(ckey, `/contribute?c=${ckey}`); // follows the host when it moves
 let myLimits = store.get("limits", { ...DEFAULT_LIMITS });
 const done = store.get("helped", { answers: 0, tokens: 0, compute_s: 0 });
 
@@ -18,7 +19,7 @@ function drawStats() {
 }
 
 function drawLimits() {
-  fill($("mylimits"), limitEditor(myLimits, (l) => { myLimits = l; store.set("limits", l); if (pw) pw.limits(l); }, { label: "When working" }));
+  fill($("mylimits"), limitEditor(myLimits, (l) => { myLimits = l; store.set("limits", l); if (pw) pw.limits(l); }, { label: "When working", cores: browserCores() }));
 }
 
 function setRunning(on) {
@@ -30,7 +31,9 @@ function setRunning(on) {
 
 function start() {
   pw = new PageWorker(ckey, ident, myLimits, {
-    onState: (d) => { $("wstatus").className = d.state === "ready" ? "ok" : d.state === "error" ? "bad" : "muted"; $("wstatus").textContent = workerStatusText(d); },
+    onState: (d) => {
+      if (/lost|retry|could not connect/.test(d.note || "")) follower.lost(); else if (d.state === "ready") follower.ok();
+      $("wstatus").className = d.state === "ready" ? "ok" : d.state === "error" ? "bad" : "muted"; $("wstatus").textContent = workerStatusText(d); },
     onLimits: (l) => { myLimits = l; store.set("limits", l); drawLimits(); },
     onCredit: (c) => {
       done.answers++; done.tokens += c.tokens; done.compute_s += c.compute_s;

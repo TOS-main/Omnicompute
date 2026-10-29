@@ -25,6 +25,7 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 from cryptography.exceptions import InvalidTag
 
+from . import project
 from .crypto import MeshCipher, contribute_key
 from .hf import split_spec
 from .messenger import Messenger
@@ -311,7 +312,8 @@ class Hub:
 
     async def _hello(self, request: web.Request) -> web.Response:
         """No key needed: lets a second `edgemesh host` see that EdgeMesh already runs on a port."""
-        return web.json_response({"edgemesh": True, "mesh": hashlib.sha256(self.secret.encode()).hexdigest()[:12]})
+        return web.json_response({"edgemesh": True, "mesh": hashlib.sha256(self.secret.encode()).hexdigest()[:12],
+                                  "repo": project.REPO, "raw": project.RAW, "pages": project.PAGES})
 
     async def _contribute_page(self, request: web.Request) -> web.Response:
         return web.Response(text=_web_file("contribute.html"), content_type="text/html")
@@ -420,7 +422,7 @@ class Hub:
         name = request.match_info["name"]
         types = {"app.js": "application/javascript", "worker.js": "application/javascript",
                  "common.js": "application/javascript", "contribute.js": "application/javascript",
-                 "gpu.js": "application/javascript",
+                 "gpu.js": "application/javascript", "beacon.js": "application/javascript",
                  "model.js": "application/javascript", "pool.js": "application/javascript", "style.css": "text/css",
                  "icon.svg": "image/svg+xml", "manifest.webmanifest": "application/manifest+json"}
         if name not in types:
@@ -530,6 +532,7 @@ class Hub:
                          "limit": c.info.get("limit", 100), "limit_reason": c.info.get("limit_reason"),
                          "limits": c.info.get("limits"), "is_hub_machine": c.info.get("hub_machine", False),
                          "contributor": c.contributor, "rtt_ms": c.info.get("rtt_ms"), "cores": c.info.get("cores"),
+                         "cores_total": c.info.get("cores_total"),
                          "power": c.info.get("power"), "uses": c.info.get("uses"), "gpu": c.info.get("gpu"),
                          "helped": o.helped.get(c.node_id) if o else None}
                         for c in self.clients.values()],

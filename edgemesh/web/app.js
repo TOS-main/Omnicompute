@@ -31,6 +31,8 @@ document.addEventListener("click", (e) => {
 const state = { status: null, model: null, liveLoad: {}, generating: null, ident: null };
 let worker = null;
 let myLimits = store.get("limits", { ...DEFAULT_LIMITS });
+// the host moved (new tunnel or Wi-Fi address): find it through the permanent link's beacon
+const follower = hostFollower(() => key, () => `/?k=${encodeURIComponent(key)}`);
 
 // ================================================================ status polling
 
@@ -42,8 +44,10 @@ async function refreshStatus() {
     if (e.message === "wrong mesh key") { askForKey(true); return false; }
     $("pill").textContent = "main computer unreachable";
     $("pill").className = "pill bad";
+    follower.lost();
     return true;
   }
+  follower.ok();
   const s = state.status, n = s.devices.filter((d) => d.role === "worker").length;
   $("pill").className = "pill ok";
   $("pill").textContent = `${s.model ? s.model.name.split("/").pop() : "no model"} · ${n} device${n === 1 ? "" : "s"}${s.busy ? " · generating" : ""}`;
@@ -103,7 +107,7 @@ function renderDevices() {
     c.platform.textContent = d.platform || "";
     if (!c.card.contains(document.activeElement) && JSON.stringify(d.limits) !== c.lastLimits) {
       c.lastLimits = JSON.stringify(d.limits);
-      c.limitSlot.replaceChildren(limitEditor(d.limits, (l) => setRemoteLimits(d.node_id, l, c)));
+      c.limitSlot.replaceChildren(limitEditor(d.limits, (l) => setRemoteLimits(d.node_id, l, c), { cores: d.cores_total }));
     }
   }
   for (const [id, c] of cards) if (!seen.has(id)) { c.card.remove(); cards.delete(id); }
@@ -155,7 +159,7 @@ function drawMyLimits() {
     myLimits = l;
     store.set("limits", l);
     if (worker) worker.limits(l);
-  }, { label: "When working" }));
+  }, { label: "When working", cores: browserCores() }));
 }
 
 function setMode(mode) {

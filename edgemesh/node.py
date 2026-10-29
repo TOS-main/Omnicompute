@@ -186,9 +186,18 @@ def parse_join_url(url: str) -> tuple[str, str]:
     """'http://1.2.3.4:8000/?k=SECRET' -> ('http://1.2.3.4:8000', 'SECRET').
     A contribute-only link ('.../contribute?c=KEY') gives its contribute key instead."""
     url = url.strip().strip("\"'<>()[] .,;")  # copied with quotes or sentence punctuation
+    if is_contribute_key(url):  # just a contribute code
+        return "beacon:", url
+    if url.lower() == "creator":  # help the public mesh of the person who runs this project
+        from .project import CREATOR_CODE
+
+        return "beacon:", CREATOR_CODE
     parts = urlsplit(url if "://" in url else "http://" + url)
-    q = dict(q.split("=", 1) for q in parts.query.split("&") if "=" in q)
-    return f"{parts.scheme}://{parts.netloc}", unquote(q.get("k") or q.get("c", "")).strip()
+    q = dict(q.split("=", 1) for q in (parts.query + "&" + parts.fragment).split("&") if "=" in q)
+    key = unquote(q.get("k") or q.get("c", "")).strip()
+    if parts.path.endswith("go.html"):  # a permanent link: the host's address comes from its beacon
+        return "beacon:", key
+    return f"{parts.scheme}://{parts.netloc}", key
 
 
 class MeshNode(Messenger):

@@ -1,5 +1,10 @@
-# EdgeMesh one-line installer for Windows, served by your main computer.
+# EdgeMesh one-line installer for Windows. Works from any network:
+#   $env:EDGEMESH_CODE="CODE"; irm https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/install.ps1 | iex
+# (CODE = the contribute code or permanent link the main device shows), or served by the main device:
 #   irm "@ORIGIN@/install.ps1?c=@KEY@" | iex
+# Without a code it asks: join my mesh, start my own mesh here ($env:EDGEMESH_HOST="1"), or help
+# the creator's public mesh ($env:EDGEMESH_CODE="creator").
+# $env:EDGEMESH_CORES=N picks how many CPU cores to use without asking; $env:EDGEMESH_YES="1" answers yes.
 # Installs Python if needed (with winget), installs EdgeMesh into its own folder, and starts
 # contributing in the background with no window. It starts again at every login.
 # The main computer can remove it again (Devices tab > Remove), which uninstalls it here.
@@ -11,6 +16,30 @@ $ProgressPreference = "SilentlyContinue"
 $Hub = "@ORIGIN@"
 $Key = "@KEY@"
 $Dir = Join-Path $env:LOCALAPPDATA "EdgeMesh"
+$Repo = if ($env:EDGEMESH_REPO) { $env:EDGEMESH_REPO } else { "TOS-main/edgemesh" }
+if ($Hub.StartsWith("@")) {  # run straight from GitHub: the code finds the main device wherever it is
+  $Hub = ""
+  $Code = $env:EDGEMESH_CODE
+  $HostMode = $env:EDGEMESH_HOST -eq "1"
+  if (-not $Code -and -not $HostMode) {
+    Write-Host "What should this computer do?"
+    Write-Host "  1) Help my own mesh (I have a code or link from my main device)"
+    Write-Host "  2) Start my own mesh here (this computer becomes the main device)"
+    Write-Host "  3) Help the EdgeMesh creator's public mesh with spare power"
+    $choice = Read-Host "Choose 1, 2 or 3"
+    if ($choice -eq "1") { $Code = Read-Host "Paste the code or link" }
+    elseif ($choice -eq "2") { $HostMode = $true }
+    elseif ($choice -eq "3") { $Code = "creator" }
+    if (-not $Code -and -not $HostMode) { Write-Host "Nothing was installed."; return }
+  }
+  $From = "GitHub ($Repo)"
+  if ($HostMode) { $Join = ""; $Where = "a new mesh of your own" }
+  elseif ($Code -eq "creator") { $Join = "creator"; $Where = "the EdgeMesh creator's public mesh" }
+  else { $Join = $Code.Trim(); $Where = "your mesh" }
+} else {
+  $Join = "$Hub/contribute?c=$Key"; $From = "your main device"; $Where = $Hub
+}
+$CoresAll = [Environment]::ProcessorCount
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 # lets "Remove device" on the main computer delete this folder again
 Set-Content -Path (Join-Path $Dir "installed-by-edgemesh-installer") -Value "EdgeMesh installer"
@@ -29,11 +58,18 @@ function Find-Python {
   return $null
 }
 
-Write-Host "EdgeMesh will set up this computer to lend its spare power to the AI mesh at $Hub."
+if (-not $Join) {
+  Write-Host "EdgeMesh will make this computer the main device of $Where."
+  Write-Host "  - installs into $Dir (no admin rights needed)"
+  Write-Host "  - then starts it in this window; close the window to stop, and start it again from the"
+  Write-Host "    'EdgeMesh host' shortcut on your desktop"
+} else {
+Write-Host "EdgeMesh will set up this computer to lend its spare power to $Where."
 Write-Host "  - installs into $Dir (no admin rights needed)"
 Write-Host "  - runs in the background with no window (it shows in Task Manager as pythonw / EdgeMesh)"
 Write-Host "  - starts when you sign in, uses at most 80% by default, and pauses when the main computer says so"
 Write-Host "  - stop and remove it any time:  & `"$Dir\venv\Scripts\edgemesh.exe`" contribute --uninstall"
+}
 Write-Host "Only do this on a computer you own or have permission to use."
 if ($env:EDGEMESH_YES -ne "1") {
   $answer = Read-Host "Continue? [y/N]"
@@ -48,12 +84,19 @@ if (-not $py) {
   if (-not $py) { throw "Python could not be installed automatically. Install it from python.org, then run this command again." }
 }
 
-Write-Host "Downloading EdgeMesh from your main computer..."
+$Cores = $env:EDGEMESH_CORES
+if (-not $Cores -and $env:EDGEMESH_YES -ne "1") { $Cores = Read-Host "This computer has $CoresAll CPU cores. How many should EdgeMesh use? [all]" }
+$n = 0
+if (-not ([int]::TryParse("$Cores", [ref]$n)) -or $n -lt 1 -or $n -ge $CoresAll) { $n = 0 }
+
+Write-Host "Downloading EdgeMesh from $From..."
 $zip = Join-Path $Dir "edgemesh.zip"
-Invoke-WebRequest -UseBasicParsing -Uri "$Hub/download/edgemesh.zip?c=$Key" -OutFile $zip
+$url = if ($Hub) { "$Hub/download/edgemesh.zip?c=$Key" } else { "https://github.com/$Repo/archive/refs/heads/main.zip" }
+Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip
 $src = Join-Path $Dir "src"
 if (Test-Path $src) { Remove-Item -Recurse -Force $src }
 Expand-Archive -Path $zip -DestinationPath $src -Force
+$pkg = (Get-ChildItem -Path $src -Directory | Where-Object { Test-Path (Join-Path $_.FullName "pyproject.toml") } | Select-Object -First 1).FullName
 
 $venv = Join-Path $Dir "venv"
 if (-not (Test-Path (Join-Path $venv "Scripts\python.exe"))) {
@@ -62,7 +105,7 @@ if (-not (Test-Path (Join-Path $venv "Scripts\python.exe"))) {
 }
 $vpy = Join-Path $venv "Scripts\python.exe"
 Write-Host "Installing (this takes a minute the first time)..."
-& $vpy -m pip install --quiet --disable-pip-version-check --upgrade (Join-Path $src "edgemesh-src")
+& $vpy -m pip install --quiet --disable-pip-version-check --upgrade $pkg
 if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 
 # NVIDIA card: offer CUDA (PyTorch), which runs the model several times faster than DirectX 12
@@ -82,9 +125,23 @@ if ($nvidia) {
   $ErrorActionPreference = "Stop"
 }
 
-& $vpy -m edgemesh contribute "$Hub/contribute?c=$Key"
+$coreArgs = if ($n -gt 0) { @("--cores", "$n") } else { @() }
+if (-not $Join) {
+  $exe = Join-Path $venv "Scripts\edgemesh.exe"
+  $lnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "EdgeMesh host.lnk"
+  try {
+    $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+    $s.TargetPath = $exe; $s.Arguments = (@("host", "--public") + $coreArgs) -join " "; $s.Save()
+  } catch {}
+  Write-Host ""
+  Write-Host "Starting your mesh. Share the permanent contribute link it prints; it keeps working when"
+  Write-Host "this computer's address changes. Close this window to stop."
+  & $exe host --public @coreArgs
+  return
+}
+& $vpy -m edgemesh contribute $Join @coreArgs
 Write-Host ""
-Write-Host "Done. This computer now shows up in the main computer's Devices tab."
-Write-Host "Usage limit is 80% by default; change it there. On this computer:"
+Write-Host "Done. This computer now shows up in the main device's Devices tab, from any network."
+Write-Host "Usage limit is 80% by default; change it and the cores there. On this computer:"
 Write-Host "  pause:      & `"$venv\Scripts\edgemesh.exe`" contribute --stop"
 Write-Host "  uninstall:  & `"$venv\Scripts\edgemesh.exe`" contribute --uninstall"

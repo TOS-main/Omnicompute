@@ -88,6 +88,7 @@ async def test_contribute_page_with_webgpu(model_file):
     """A phone on the contribute-only link, computing on its GPU through WebGPU."""
     path, cfg, w = model_file
     hub, nodes = await start_mesh(path, [("pc", False, 1000)])
+    hub.orchestrator.share_with_helpers = True
     url = f"http://127.0.0.1:{hub.port}/contribute?c={hub.contribute_key}"
     async with playwright.async_playwright() as p:
         exe = os.environ.get("EDGEMESH_CHROMIUM") or ("/opt/pw-browsers/chromium" if os.path.exists("/opt/pw-browsers/chromium") else None)
@@ -150,4 +151,39 @@ async def test_wrong_saved_key_asks_again(model_file):
             await browser.close()
             for x in nodes:
                 await x.close()
+            await hub.close()
+
+
+async def test_core_picker_limits_a_browser_worker(model_file):
+    """One tap on the contribute page caps how many cores the browser computes with."""
+    path, cfg, w = model_file
+    hub, nodes = await start_mesh(path, [("pc", False, 1000)])
+    url = f"http://127.0.0.1:{hub.port}/contribute?c={hub.contribute_key}"
+    async with playwright.async_playwright() as p:
+        exe = os.environ.get("EDGEMESH_CHROMIUM") or ("/opt/pw-browsers/chromium" if os.path.exists("/opt/pw-browsers/chromium") else None)
+        browser = await p.chromium.launch(executable_path=exe, args=["--no-sandbox"]) if exe else await p.chromium.launch()
+        try:
+            ctx = await browser.new_context()
+            page = await ctx.new_page()
+            await page.goto(url)
+            await page.evaluate("localStorage.setItem('edgemesh.name', JSON.stringify('laptop'));"
+                                "localStorage.setItem('edgemesh.limits', JSON.stringify({cpu: 100, always: true, gpu: false}))")
+            await page.reload()
+            total = await page.evaluate("browserCores()")
+            if total < 3:
+                pytest.skip("this machine has too few cores to pick from")
+            assert await page.locator(".cores button", has_text=f"All {total}").count() == 1
+            await page.locator(".cores button", has_text="2").first.click()
+            await page.click("#toggle")
+            for _ in range(200):
+                c = hub.clients.get("laptop")
+                if c and c.info.get("cores") == 2:
+                    break
+                await asyncio.sleep(0.1)
+            assert hub.clients["laptop"].info["cores"] == 2 and hub.clients["laptop"].info["cores_total"] == total
+            assert await page.locator(".cores button.on").inner_text() == "2"
+        finally:
+            await browser.close()
+            for n in nodes:
+                await n.close()
             await hub.close()

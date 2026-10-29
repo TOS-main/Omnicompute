@@ -33,6 +33,11 @@ def _asset() -> str:
 
 
 def find_or_download(home: Path) -> str:
+    import os
+
+    given = os.environ.get("EDGEMESH_CLOUDFLARED")  # the Android app ships its own build
+    if given and Path(given).exists():
+        return given
     found = shutil.which("cloudflared")
     if found:
         return found

@@ -1,9 +1,11 @@
 #!/data/data/com.termux/files/usr/bin/sh
-# EdgeMesh main computer on an Android phone, in Termux (install Termux from F-Droid or GitHub,
-# not the old Play Store version). Paste into Termux:
-#   curl -fsSL "@ORIGIN@/termux.sh?k=@KEY@" | sh      (host: this phone becomes the main computer)
-#   curl -fsSL "@ORIGIN@/termux.sh?c=CONTRIBUTE" | sh  (contribute: this phone computes for the mesh)
-# or run it from an unzipped EdgeMesh folder:  sh edgemesh/installers/termux-host.sh
+# EdgeMesh on an Android phone, in Termux (install Termux from F-Droid or GitHub, not the old
+# Play Store version). No computer needed; paste into Termux:
+#   curl -fsSL https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/termux-host.sh | sh
+#       host: this phone becomes the main device of a new mesh (EDGEMESH_KEY=KEY keeps an old mesh key)
+#   curl -fsSL https://raw.githubusercontent.com/TOS-main/edgemesh/main/edgemesh/installers/termux-host.sh | EDGEMESH_CODE=CODE sh
+#       contribute: this phone computes for the mesh whose contribute code or link this is
+# A main device serves the same script with its key filled in: curl -fsSL "@ORIGIN@/termux.sh?k=@KEY@" | sh
 # Hosting keeps the same mesh key, so your links only change address. A host can also compute
 # (asked below); computing natively uses all CPU cores with NumPy and is usually faster than
 # the browser page.
@@ -12,12 +14,16 @@ HUB="@ORIGIN@"
 KEY="@KEY@"
 MODE="@MODE@"
 case "$HUB" in @*) HUB="" ;; esac
-case "$KEY" in @*) KEY="" ;; esac
+case "$KEY" in @*) KEY="${EDGEMESH_KEY:-}" ;; esac
 case "$MODE" in @*) MODE="host" ;; esac
+REPO="${EDGEMESH_REPO:-TOS-main/edgemesh}"
+JOIN=""
+if [ -n "${EDGEMESH_CODE:-}" ]; then MODE="contribute"; JOIN="$EDGEMESH_CODE"
+elif [ "$MODE" = "contribute" ]; then JOIN="$HUB/contribute?c=$KEY"; fi
 DIR="$HOME/.edgemesh"
 
 if [ "$MODE" = "contribute" ]; then
-  echo "EdgeMesh will let this phone compute for the AI mesh at $HUB."
+  echo "EdgeMesh will let this phone compute for your AI mesh."
 else
   echo "EdgeMesh will make this phone the main computer of your AI mesh."
 fi
@@ -52,13 +58,18 @@ if [ -n "$HUB" ]; then
   curl -fsSL "$HUB/download/edgemesh.zip?k=$KEY" -o "$DIR/edgemesh.zip"
   rm -rf "$DIR/src" && unzip -q "$DIR/edgemesh.zip" -d "$DIR/src"
   SRC="$DIR/src/edgemesh-src"
+elif [ -f "$(dirname "$0")/../../pyproject.toml" ]; then
+  SRC="$(cd "$(dirname "$0")/../.." && pwd)"  # run from an unzipped EdgeMesh folder
 else
-  SRC="$(cd "$(dirname "$0")/../.." && pwd)"
+  echo "Downloading EdgeMesh from GitHub ($REPO)..."
+  curl -fsSL "https://github.com/$REPO/archive/refs/heads/main.zip" -o "$DIR/edgemesh.zip"
+  rm -rf "$DIR/src" && unzip -q "$DIR/edgemesh.zip" -d "$DIR/src"
+  SRC="$(dirname "$(ls "$DIR"/src/*/pyproject.toml | head -n 1)")"
 fi
 pip install --quiet --disable-pip-version-check --no-deps --upgrade "$SRC"
 [ "$MODE" = "host" ] && [ -n "$KEY" ] && printf "%s" "$KEY" > "$DIR/mesh.key"  # same key: links keep working
 echo "$COMPUTE" > "$DIR/termux-compute"
-if [ "$MODE" = "contribute" ]; then printf "%s/contribute?c=%s" "$HUB" "$KEY" > "$DIR/termux-join"
+if [ "$MODE" = "contribute" ]; then printf "%s" "$JOIN" > "$DIR/termux-join"
 else rm -f "$DIR/termux-join"; fi  # hosting replaces an earlier contribute setup
 
 BIN="$PREFIX/bin"
@@ -79,7 +90,7 @@ fi
 if [ "$(cat "$D/termux-compute" 2>/dev/null)" = "1" ]; then EXTRA="--cpu 50"; else EXTRA="--no-worker"; fi
 nohup python -m edgemesh host --public $EXTRA > "$D/host.log" 2>&1 &
 sleep 12
-grep -E "Open|Contribute|Windows|Mac|joined" "$D/host.log" || echo "Starting... see ~/.edgemesh/host.log"
+grep -E -A1 "Open|Permanent|full:|contribute:|Windows|Mac|joined" "$D/host.log" || echo "Starting... see ~/.edgemesh/host.log"
 RUN
 cat > "$BIN/edgemesh-host-stop" <<'RUN'
 #!/data/data/com.termux/files/usr/bin/sh
@@ -93,6 +104,6 @@ mkdir -p "$HOME/.termux/boot" && cp "$BIN/edgemesh-host" "$HOME/.termux/boot/edg
 edgemesh-host
 echo
 if [ "$MODE" = "contribute" ]; then echo "Done. This phone now shows up in the main computer's Devices tab."
-else echo "Done. Open the 'ANYWHERE' link above on your devices (it changes when the phone restarts EdgeMesh)."; fi
+else echo "Done. Save the permanent links above: they keep working when the phone's address changes."; fi
 echo "Later: edgemesh-host to start, edgemesh-host-stop to stop, cat ~/.edgemesh/host.log for the links."
 echo "Tip: Android Settings > Apps > Termux > Battery > Unrestricted keeps it from being paused."

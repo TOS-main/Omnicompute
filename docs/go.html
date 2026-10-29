@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>EdgeMesh link</title>
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --text: #14161a; --muted: #5c6370; --accent: #3b6ff5; --bad: #c4321c; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0f1115; --card: #181b22; --text: #e8eaef; --muted: #9aa2b1; --accent: #6d93ff; --bad: #ff6b55; } }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, sans-serif; display: grid; place-items: center; min-height: 100vh; }
+  .card { background: var(--card); border-radius: 14px; padding: 24px; max-width: 440px; margin: 16px; box-shadow: 0 2px 12px #0002; }
+  h1 { font-size: 20px; margin: 0 0 8px; } p { color: var(--muted); margin: 8px 0; }
+  a.btn, button { display: inline-block; background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 10px 16px; font: inherit; text-decoration: none; margin: 6px 6px 0 0; cursor: pointer; }
+  a.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  input { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 10px; border: 1px solid #8884; font: inherit; background: transparent; color: inherit; }
+  .bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1 id="title">Finding your mesh…</h1>
+  <p id="text">Looking up where its main computer is right now.</p>
+  <div id="actions"></div>
+</div>
+<script src="beacon.js"></script>
+<script>
+"use strict";
+// The key is after '#', so it never reaches GitHub or anyone else; only this page reads it.
+const h = new URLSearchParams(location.hash.slice(1));
+const key = h.get("k") || h.get("c");
+const full = !!h.get("k");
+const $ = (id) => document.getElementById(id);
+const link = (origin) => full ? `${origin}/?k=${encodeURIComponent(key)}` : `${origin}/contribute?c=${encodeURIComponent(key)}`;
+
+async function go() {
+  if (!key) {
+    $("title").textContent = "Open an EdgeMesh link";
+    $("text").textContent = "Paste the link or contribute code you were given.";
+    $("actions").innerHTML = '<form id="f"><input id="v" placeholder="https://…/go.html#c=… or c1234…"><button>Open</button></form>';
+    $("f").onsubmit = (e) => { e.preventDefault(); const v = $("v").value.trim(); location.hash = v.includes("#") ? v.split("#")[1] : `c=${v}`; location.reload(); };
+    return;
+  }
+  let info = null;
+  try { info = await findHost(key); } catch { /* offline or blocked */ }
+  if (!info) {
+    $("title").textContent = "The main computer isn't online";
+    $("text").innerHTML = "It hasn't posted its address in the last 12 hours, or it's turned off. This page tries again every 15 seconds.";
+    setTimeout(go, 15000);
+    return;
+  }
+  $("title").textContent = "Found it";
+  $("text").textContent = `Opening ${new URL(info.url).host}…`;
+  $("actions").innerHTML = `<a class="btn" href="${link(info.url)}">Open</a>` +
+    (info.lan && info.lan !== info.url ? `<a class="btn ghost" href="${link(info.lan)}">On the same Wi-Fi (faster)</a>` : "");
+  setTimeout(() => location.replace(link(info.url)), 900);
+}
+go();
+</script>
+</body>
+</html>

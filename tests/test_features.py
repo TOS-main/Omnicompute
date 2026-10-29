@@ -261,7 +261,7 @@ async def test_shared_chat_models_capacity_and_installers(model_file, tmp_path):
             ck = hub.contribute_key
             async with s.get(base + "/install.sh?c=" + ck) as r:
                 sh = await r.text()
-            assert f'HUB="{base}"' in sh and f'KEY="{ck}"' in sh and "@" not in sh.split("set -e")[1].split("PY=")[0]
+            assert f'HUB="{base}"' in sh and f'KEY="{ck}"' in sh and "@ORIGIN@" not in sh and "@KEY@" not in sh.split("set -e")[1]
             async with s.get(base + "/install.ps1?c=" + ck) as r:
                 assert f'$Key = "{ck}"' in await r.text()
             async with s.get(base + "/install.sh?c=wrong") as r:
@@ -407,7 +407,7 @@ def test_mesh_key_is_kept_and_can_be_set(tmp_path, monkeypatch, capsys):
     assert cli._mesh_key(None) == "my-own-key-1"  # yours from then on
     asyncio.run(cli.cmd_links(argparse.Namespace(key=None)))
     out = capsys.readouterr().out
-    assert "?k=my-own-key-1" in out and "contribute?c=c" in out and "install.ps1?c=c" in out
+    assert "?k=my-own-key-1" in out and "contribute?c=c" in out and 'EDGEMESH_CODE="c' in out and "go.html#c=c" in out
 
 
 async def test_termux_host_script_needs_the_full_key(model_file):
@@ -430,3 +430,73 @@ async def test_termux_host_script_needs_the_full_key(model_file):
         for x in nodes:
             await x.close()
         await hub.close()
+
+
+def test_permanent_link_pieces_and_github_installers():
+    """The beacon script is the same on the web page and the GitHub Pages permanent link, and the
+    installers run straight from GitHub with just a code (no main device on the same network)."""
+    root = Path(__file__).resolve().parent.parent
+    assert (root / "docs" / "beacon.js").read_text() == (root / "edgemesh" / "web" / "beacon.js").read_text()
+    for name in ("install.sh", "termux-host.sh"):
+        text = (root / "edgemesh" / "installers" / name).read_text()
+        assert "EDGEMESH_CODE" in text and "archive/refs/heads/main.zip" in text
+    ps = (root / "edgemesh" / "installers" / "install.ps1").read_text()
+    assert "EDGEMESH_CODE" in ps and "archive/refs/heads/main.zip" in ps and "--cores" in ps
+    assert "--cores" in (root / "edgemesh" / "installers" / "install.sh").read_text()
+
+
+def test_cores_flag_is_saved_and_scales_the_score(tmp_path):
+    from edgemesh import limits as L
+
+    store = L.LimitStore(tmp_path / "l.json", {"cores": 4})
+    assert store.limits["cores"] == 4
+    assert L.LimitStore(tmp_path / "l.json").limits["cores"] == 4  # kept after a restart
+
+
+def test_install_sh_from_github_downloads_the_repo(tmp_path):
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "curl").write_text(f'#!/bin/sh\necho "$@" > "{tmp_path}/curl-args"\nexit 1\n')
+    (bin_ / "curl").chmod(0o755)
+    script = Path(__file__).resolve().parent.parent / "edgemesh" / "installers" / "install.sh"
+    env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "HOME": str(tmp_path), "EDGEMESH_YES": "1",
+           "EDGEMESH_CODE": "c" + "ab" * 12, "EDGEMESH_REPO": "someone/fork"}
+    out = subprocess.run(["sh", str(script)], env=env, capture_output=True, text=True, timeout=60)
+    assert "Downloading EdgeMesh from GitHub (someone/fork)" in out.stdout
+    assert "https://github.com/someone/fork/archive/refs/heads/main.zip" in (tmp_path / "curl-args").read_text()
+
+
+def test_android_entry_point_hosts_and_stops(tmp_path, monkeypatch):
+    """What the Android app's service calls: host on a thread, find the key, stop again."""
+    import socket
+    import sys as _sys
+    import time
+    import urllib.request
+
+    from edgemesh import android
+
+    monkeypatch.setenv("EDGEMESH_BEACON", "off")
+    monkeypatch.setattr(_sys, "stdout", _sys.stdout)
+    monkeypatch.setattr(_sys, "stderr", _sys.stderr)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    import edgemesh.cli as cli
+
+    monkeypatch.setattr(cli, "HOME", tmp_path / ".edgemesh")
+    android.start(str(tmp_path), port=port, public=False)
+    try:
+        for _ in range(100):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/hello", timeout=1) as r:
+                    assert json.load(r)["edgemesh"]
+                break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            raise AssertionError((tmp_path / ".edgemesh" / "host.log").read_text())
+        assert android.running() and android.mesh_key(str(tmp_path))
+        assert "go.html#c=c" in android.permanent_link(str(tmp_path))
+    finally:
+        android.stop()
+    assert not android.running()

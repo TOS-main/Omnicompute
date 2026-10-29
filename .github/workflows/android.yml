@@ -1,0 +1,115 @@
+# Builds the EdgeMesh Android app and publishes it as the "android" release, so the newest APK
+# is always at https://github.com/<owner>/<repo>/releases/latest/download/edgemesh.apk
+name: Android app
+
+on:
+  push:
+    branches: [main]
+    paths: ["edgemesh/**", "android/**", "pyproject.toml", ".github/workflows/android.yml"]
+  pull_request:
+    paths: ["edgemesh/**", "android/**", "pyproject.toml", ".github/workflows/android.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick the cloudflared version
+        id: cf
+        run: |
+          tag=$(curl -fsSL -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/cloudflare/cloudflared/releases/latest | jq -r .tag_name)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cloudflared for Android
+        id: cfcache
+        uses: actions/cache@v4
+        with:
+          path: android/app/src/main/jniLibs
+          key: cloudflared-android-${{ steps.cf.outputs.tag }}
+
+      - name: Get the cloudflared source
+        if: steps.cfcache.outputs.cache-hit != 'true'
+        run: git clone --depth 1 --branch "${{ steps.cf.outputs.tag }}" https://github.com/cloudflare/cloudflared /tmp/cloudflared
+
+      - uses: actions/setup-go@v5
+        if: steps.cfcache.outputs.cache-hit != 'true'
+        with:
+          go-version-file: /tmp/cloudflared/go.mod
+          cache: false
+
+      - name: Build cloudflared for Android (with the NDK, so it uses Android's DNS)
+        if: steps.cfcache.outputs.cache-hit != 'true'
+        run: |
+          tc="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cd /tmp/cloudflared
+          for pair in "arm64-v8a arm64 aarch64-linux-android26-clang" "x86_64 amd64 x86_64-linux-android26-clang"; do
+            set -- $pair
+            mkdir -p "$GITHUB_WORKSPACE/android/app/src/main/jniLibs/$1"
+            CGO_ENABLED=1 GOOS=android GOARCH=$2 CC="$tc/$3" \
+              go build -trimpath -ldflags "-s -w -X main.Version=${{ steps.cf.outputs.tag }}" \
+              -o "$GITHUB_WORKSPACE/android/app/src/main/jniLibs/$1/libcloudflared.so" ./cmd/cloudflared
+          done
+          ls -la "$GITHUB_WORKSPACE/android/app/src/main/jniLibs"/*
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5  # Chaquopy needs the same Python version on the build machine
+        with:
+          python-version: "3.11"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Use the private signing key, if the repository has one
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "EDGEMESH_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build the APK
+        working-directory: android
+        env:
+          EDGEMESH_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          EDGEMESH_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          EDGEMESH_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          # aiohttp and friends have no Android wheels: build their pure-Python versions
+          AIOHTTP_NO_EXTENSIONS: "1"
+          MULTIDICT_NO_EXTENSIONS: "1"
+          YARL_NO_EXTENSIONS: "1"
+          FROZENLIST_NO_EXTENSIONS: "1"
+          PROPCACHE_NO_EXTENSIONS: "1"
+        run: |
+          # empty secrets mean "use the shared key's defaults"
+          for v in EDGEMESH_KEYSTORE_PASSWORD EDGEMESH_KEY_ALIAS EDGEMESH_KEY_PASSWORD; do
+            [ -n "$(printenv $v)" ] || unset $v
+          done
+          gradle --no-daemon assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/edgemesh.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: edgemesh-apk
+          path: edgemesh.apk
+
+      - name: Publish as the latest release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+          tag="android-v$version-${{ github.run_number }}"
+          gh release create "$tag" edgemesh.apk --title "EdgeMesh $version for Android (build ${{ github.run_number }})" \
+            --notes "Install edgemesh.apk on your phone (allow installing from this source when asked). It hosts your mesh in the background; no Termux needed." \
+            --latest

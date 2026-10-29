@@ -169,7 +169,7 @@ function engineInfo() {
   stats.activeCores = cpuPool ? cpuPool.active : 1;
   stats.power = power;
   return { score: Math.round((gpu ? gpuScore : cpuScore * stats.activeCores / stats.cores) * 100) / 100,
-           cpu_score: Math.round(cpuScore * 100) / 100, cores: stats.activeCores, uses: gpu ? "gpu" : "cpu", power,
+           cpu_score: Math.round(cpuScore * 100) / 100, cores: stats.activeCores, cores_total: stats.cores, uses: gpu ? "gpu" : "cpu", power,
            gpu: gpuPool ? { name: gpuPool.name, score: Math.round(gpuScore * 100) / 100 } : null };
 }
 
@@ -320,7 +320,7 @@ onmessage = async (ev) => {
   if (ev.data.cmd === "start") {
     if (ev.data.limits) limits = ev.data.limits;
     status("connecting", { note: "measuring this device's speed" });
-    const cores = typeof Worker === "undefined" ? 1 : Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 2) - 1));
+    const cores = typeof Worker === "undefined" ? 1 : Math.max(1, Math.min(16, (navigator.hardwareConcurrency || 2) - 1));
     if (cores > 1) { cpuPool = new Pool(cores); cpuScore = await cpuPool.bench(); } else cpuScore = benchmark();
     stats.cores = cores;
     gpuPool = await GpuPool.open();
