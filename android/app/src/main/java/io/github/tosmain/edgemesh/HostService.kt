@@ -87,6 +87,7 @@ class HostService : Service() {
         const val CHANNEL = "hosting"
         const val ACTION_STOP = "io.github.tosmain.edgemesh.STOP"
 
+        @Synchronized
         fun py(context: Context): Python {
             if (!Python.isStarted()) Python.start(AndroidPlatform(context.applicationContext))
             return Python.getInstance()
