@@ -25,10 +25,13 @@ from edgemesh.worker import Worker
 from test_mesh import KEY, collect, model_file, reference, start_mesh  # noqa: F401
 
 
-def _gpu():
-    from edgemesh.gpu import open_gpu
+def _gpu(bits=16):
+    from edgemesh.gpu import GPU, open_gpu
 
-    return open_gpu(allow_software=True)
+    gpu = open_gpu(allow_software=True)
+    if isinstance(gpu, GPU):
+        gpu.bits = bits  # 16: exact enough to compare tokens with the CPU
+    return gpu
 
 
 # ---------------------------------------------------------------- contribute-only key
@@ -105,11 +108,46 @@ def test_gpu_shard_matches_cpu():
                                    cpu.forward("j", np.array([5], np.int32), 4), atol=1e-4)
 
 
+def test_8bit_gpu_weights_stay_close_to_the_model():
+    gpu = _gpu(bits=8)
+    if gpu is None or gpu.backend != "webgpu":
+        pytest.skip("no WebGPU adapter")
+    cfg, w = random_model(n_layer=3, arch="llama", n_kv_head=2, tie=True)
+    cpu = Shard(cfg, dict(w), 0, 3)
+    g = Shard(cfg, dict(w), 0, 3)
+    g.use_gpu(gpu)
+    ids = np.array([3, 1, 4, 1, 5, 9], np.int32)
+    a, b = g.forward("j", ids, 0), cpu.forward("j", ids, 0)
+    assert np.abs(a - b).max() < 0.05 * np.abs(b).max()
+    assert (a.argmax(-1) == b.argmax(-1)).mean() >= 0.8
+
+
+def test_cuda_backend_through_torch(monkeypatch):
+    """The CUDA code path, run by CPU torch (there is no NVIDIA card here)."""
+    pytest.importorskip("torch")
+    from edgemesh.gpu import CudaGPU, open_gpu
+
+    monkeypatch.setenv("EDGEMESH_GPU", "torch-cpu")
+    gpu = open_gpu()
+    assert isinstance(gpu, CudaGPU)
+    for kw in [dict(arch="gpt2"), dict(arch="llama", n_kv_head=2, qkv_bias=True, tie=True)]:
+        cfg, w = random_model(n_layer=2, **kw)
+        w16 = {k: v.astype(np.float16).astype(np.float32) for k, v in w.items()}
+        cpu = Shard(cfg, dict(w16), 0, 2)
+        gpu.clear()
+        g = Shard(cfg, dict(w16), 0, 2)
+        g.use_gpu(gpu)
+        ids = np.array([3, 1, 4], np.int32)
+        np.testing.assert_allclose(g.forward("j", ids, 0), cpu.forward("j", ids, 0), atol=1e-4)
+    assert gpu.benchmark() > 0
+
+
 async def test_mesh_with_a_gpu_worker(model_file, monkeypatch):
     gpu = _gpu()
     if gpu is None:
         pytest.skip("no WebGPU adapter")
     monkeypatch.setenv("EDGEMESH_GPU", "force")
+    monkeypatch.setenv("EDGEMESH_WEIGHTS", "16")
     path, cfg, w = model_file
     hub, nodes = await start_mesh(path, [("cpu-box", False, 2)])
     n = MeshNode("gpu-box", KEY, f"http://127.0.0.1:{hub.port}",

@@ -65,6 +65,23 @@ Write-Host "Installing (this takes a minute the first time)..."
 & $vpy -m pip install --quiet --disable-pip-version-check --upgrade (Join-Path $src "edgemesh-src")
 if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 
+# NVIDIA card: offer CUDA (PyTorch), which runs the model several times faster than DirectX 12
+$nvidia = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "NVIDIA" } | Select-Object -First 1
+if ($nvidia) {
+  $ErrorActionPreference = "Continue"  # pip and python write progress to stderr; that's not a failure
+  $hasCuda = $false
+  try { & $vpy -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>$null; $hasCuda = ($LASTEXITCODE -eq 0) } catch {}
+  if (-not $hasCuda) {
+    $cuda = if ($env:EDGEMESH_YES -eq "1") { "y" } else { Read-Host "Found $($nvidia.Name). Install CUDA support for it (about 3 GB download, much faster)? [Y/n]" }
+    if ($cuda -notmatch "^[nN]") {
+      Write-Host "Installing CUDA support (PyTorch); this can take a few minutes..."
+      & $vpy -m pip install --quiet --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cu126
+      if ($LASTEXITCODE -ne 0) { Write-Host "CUDA support could not be installed; EdgeMesh will use DirectX 12 for the GPU instead." }
+    }
+  }
+  $ErrorActionPreference = "Stop"
+}
+
 & $vpy -m edgemesh contribute "$Hub/contribute?c=$Key"
 Write-Host ""
 Write-Host "Done. This computer now shows up in the main computer's Devices tab."

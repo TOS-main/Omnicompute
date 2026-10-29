@@ -148,10 +148,14 @@ command line with `--cpu 60 --schedule "22:00-07:00=100,09:00-17:00=0" --always`
 - **Cores**: how many CPU cores to use at once.
 - **Always use**: by default a device that would slow the mesh down (the extra network hop costs
   more than it saves) waits on standby; this keeps it in the split anyway.
-- **Use GPU**: on by default. PCs use the graphics card through WebGPU (`wgpu`: Direct3D 12,
-  Metal or Vulkan, so NVIDIA, AMD, Intel and Apple GPUs without CUDA); browsers use WebGPU when the
-  page is https (the `--public` link) or localhost. Weights sit on the GPU as float16. A device
-  uses the GPU only when it measures faster than its CPU; the usage % applies to the GPU too.
+- **Use GPU**: on by default. NVIDIA cards use CUDA when PyTorch's CUDA build is installed (the
+  installers offer it when they find an NVIDIA card; or run `edgemesh gpu --install-cuda`), with
+  float16 weights. Other PCs use WebGPU (`wgpu`: Direct3D 12, Metal or Vulkan, so AMD, Intel and
+  Apple GPUs too), and browsers use WebGPU when the page is https (the `--public` link) or
+  localhost. On WebGPU the weights are 8-bit with one scale per 128 rows, which halves the memory
+  each token reads (about twice as fast; `EDGEMESH_WEIGHTS=16` keeps float16). `edgemesh gpu`
+  shows which GPU is used and its speed. A device uses the GPU only when it measures faster than
+  its CPU; the usage % applies to the GPU too.
 
 The Model tab estimates tok/s and memory per device for any Hugging Face repo before you load it,
 shows the biggest model your devices can hold and run at ~10/5/1 tok/s, lists downloaded models
@@ -189,7 +193,7 @@ scripts/build_app.py`; CI builds Windows, macOS and Linux versions on every push
 
 - Browser workers always use the relay. Next: WebRTC data channels so phones connect peer to peer.
 - The GPU path multiplies matrices on the GPU and does the rest on the CPU, with one round trip
-  per group of matrices. Next: whole layers on the GPU, and int8/int4 weights.
+  per group of matrices. Next: whole layers on the GPU, and 4-bit weights.
 - float16 weights. Next: int8/int4 quantization (4x smaller downloads for phones) and GGUF import.
 - Gemma, Mixtral/MoE and long-context RoPE variants (longrope, yarn) aren't supported yet.
 - One generation at a time, one hub, one shared chat. Next: batching, several models, hub failover.

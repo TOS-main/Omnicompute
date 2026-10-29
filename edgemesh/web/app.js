@@ -81,7 +81,7 @@ function renderDevices() {
       el("span", { class: "badge" }, d.kind === "browser" ? "browser" : "app"),
       d.kind === "native" && d.direct !== false ? el("span", { class: "badge on", title: "can send directly to other app devices" }, "direct P2P")
         : el("span", { class: "badge relay", title: "traffic goes through the main computer" }, "relay"),
-      d.uses === "gpu" ? el("span", { class: "badge on", title: d.gpu && d.gpu.name }, "GPU") : null,
+      d.uses === "gpu" ? el("span", { class: "badge on", title: d.gpu && d.gpu.name }, d.gpu && d.gpu.via === "cuda" ? "GPU · CUDA" : "GPU") : null,
       d.power ? el("span", { class: "badge" }, d.power === "charging" ? "charging" : "on battery") : null,
       d.contributor ? el("span", { class: "badge", title: "joined with the contribute-only link" }, "contributor") : null,
       d.is_hub_machine ? el("span", { class: "badge" }, "main computer") : null,

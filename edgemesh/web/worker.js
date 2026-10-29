@@ -94,7 +94,7 @@ async function gpuAgrees(name, t, rows) {
   const x = new Float32Array(K);
   for (let i = 0; i < K; i++) x[i] = Math.sin(i * 12.9898) * 0.5;
   const y = await gpuPool.mm(name, x, 1);
-  const n = rows ? Math.min(N, 64) : N;
+  const n = Math.min(N, rows ? 64 : 256);
   let worst = 0, scale = 1e-3;
   for (let j = 0; j < n; j++) {
     let ref = 0;
@@ -103,7 +103,7 @@ async function gpuAgrees(name, t, rows) {
     worst = Math.max(worst, Math.abs(ref - y[j]));
     scale = Math.max(scale, Math.abs(ref));
   }
-  return Number.isFinite(worst) && worst <= 0.01 * scale + 1e-3;
+  return Number.isFinite(worst) && worst <= (gpuPool.bits === 8 ? 0.03 : 0.01) * scale + 1e-3; // 8-bit weights round a little
 }
 
 async function distribute(shard) {

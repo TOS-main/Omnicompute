@@ -73,7 +73,7 @@ def worker_info(mem_fraction: float = 0.5, gpu=None) -> dict:
     info = {"role": "worker", "kind": "native", "platform": f"{platform.system()} {platform.machine()}",
             "score": cpu, "cpu_score": cpu, "mem_mb": int(total_memory_mb() * mem_fraction)}
     if gpu is not None:
-        info["gpu"] = {"name": gpu.name, "score": gpu.benchmark()}
+        info["gpu"] = {"name": gpu.name, "score": gpu.benchmark(), "via": getattr(gpu, "backend", "webgpu")}
     return info
 
 

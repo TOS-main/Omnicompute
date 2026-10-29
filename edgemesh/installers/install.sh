@@ -46,6 +46,20 @@ fi
 echo "Installing (this takes a minute the first time)..."
 "$DIR/venv/bin/python" -m pip install --quiet --disable-pip-version-check --upgrade "$DIR/src/edgemesh-src"
 
+# NVIDIA card (Linux): offer CUDA (PyTorch), several times faster than Vulkan for this
+if command -v nvidia-smi >/dev/null 2>&1 && ! "$DIR/venv/bin/python" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+  cuda=y
+  if [ "${EDGEMESH_YES:-}" != "1" ]; then
+    printf "Found an NVIDIA card. Install CUDA support for it (about 3 GB download, much faster)? [Y/n] "
+    { read -r cuda < /dev/tty; } 2>/dev/null || cuda=y
+  fi
+  case "$cuda" in n*|N*) ;; *)
+    echo "Installing CUDA support (PyTorch); this can take a few minutes..."
+    "$DIR/venv/bin/python" -m pip install --quiet --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cu126 \
+      || echo "CUDA support could not be installed; EdgeMesh will use Vulkan for the GPU instead." ;;
+  esac
+fi
+
 "$DIR/venv/bin/python" -m edgemesh contribute "$HUB/contribute?c=$KEY"
 echo
 echo "Done. This computer now shows up in the main computer's Devices tab."

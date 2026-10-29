@@ -82,7 +82,7 @@ async def _run_worker(url: str, key: str, name: str, relay_only: bool, mem_fract
         try:
             await node.start()
             cpu_now, why = L.effective(store.limits)
-            gpu_note = f", GPU {gpu.name} {info['gpu']['score']} GFLOP/s" if gpu else ", no usable GPU (using the CPU)"
+            gpu_note = f", GPU {gpu.name} via {gpu.backend.upper()} {info['gpu']['score']} GFLOP/s" if gpu else ", no usable GPU (using the CPU)"
             print(f"[{name}] joined {url}  (CPU {info['cpu_score']} GFLOP/s{gpu_note}, offering {info['mem_mb']} MB, "
                   f"usage limit {cpu_now}% ({why}), public UDP {node.public_addr or 'unknown'})", flush=True)
             watcher = asyncio.ensure_future(worker.watch_schedule())
@@ -266,6 +266,33 @@ async def cmd_host(args) -> None:
         if tunnel:
             tunnel.kill()
         await hub.close()
+
+
+CUDA_INDEX = "https://download.pytorch.org/whl/cu126"
+
+
+def cmd_gpu(args) -> None:
+    """Show which GPU EdgeMesh uses and how fast it is; --install-cuda adds NVIDIA CUDA support."""
+    import subprocess
+
+    from .gpu import open_gpu
+    from .worker import benchmark
+
+    if args.install_cuda:
+        print("Installing CUDA support (PyTorch, about 3 GB); this can take a few minutes...")
+        r = subprocess.call([sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "torch",
+                             "--index-url", CUDA_INDEX])
+        if r:
+            sys.exit("Could not install it. EdgeMesh keeps using DirectX 12 / Vulkan / Metal for the GPU.")
+    print(f"CPU: {benchmark()} GFLOP/s")
+    gpu = open_gpu()
+    if gpu is None:
+        print("GPU: none usable (EdgeMesh uses the CPU)")
+        return
+    how = "CUDA, float16" if gpu.backend == "cuda" else f"WebGPU, {gpu.bits}-bit weights"
+    print(f"GPU: {gpu.name} ({how}): {gpu.benchmark()} GFLOP/s")
+    if gpu.backend != "cuda" and "nvidia" in gpu.name.lower():
+        print("This is an NVIDIA card: run  edgemesh gpu --install-cuda  for CUDA, which is usually faster.")
 
 
 async def cmd_links(args) -> None:
@@ -483,6 +510,9 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("url")
     s.add_argument("--key")
 
+    g = sub.add_parser("gpu", help="show the GPU EdgeMesh uses and its speed")
+    g.add_argument("--install-cuda", action="store_true", help="install CUDA support for NVIDIA cards (PyTorch)")
+
     lk = sub.add_parser("links", help="show this computer's mesh key and join links")
     lk.add_argument("--key", help=argparse.SUPPRESS)
 
@@ -503,7 +533,7 @@ def main(argv: list[str] | None = None) -> None:
                         format="%(asctime)s %(name)s %(message)s")
     fn = {"host": cmd_host, "join": cmd_join, "contribute": cmd_contribute, "run": cmd_run, "status": cmd_status,
           "make-model": cmd_make_model, "pull": cmd_pull,
-          "links": cmd_links}[args.cmd]
+          "links": cmd_links, "gpu": cmd_gpu}[args.cmd]
     try:
         if asyncio.iscoroutinefunction(fn):
             asyncio.run(fn(args))
