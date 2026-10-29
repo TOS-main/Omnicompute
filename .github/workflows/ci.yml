@@ -17,6 +17,7 @@ jobs:
   llama-cpp:
     # the fast GGUF engine for real: download llama.cpp's release build and run a tiny model
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}

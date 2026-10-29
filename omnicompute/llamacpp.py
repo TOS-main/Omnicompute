@@ -73,13 +73,15 @@ def install(home: Path, progress=lambda text: None, cpu_only: bool = False) -> s
     req = urllib.request.Request(RELEASES, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as r:
         rel = json.load(r)
-    assets = {a["name"]: a["browser_download_url"] for a in rel.get("assets", []) if a["name"].endswith(".zip")}
+    assets = {a["name"]: a["browser_download_url"] for a in rel.get("assets", [])
+              if a["name"].endswith((".zip", ".tar.gz"))}
     patterns = [p for p in asset_patterns() if not (cpu_only and "vulkan" in p)]
     pick = next((n for p in patterns for n in assets if p in n and "cudart" not in n), None)
     if pick is None:
-        raise RuntimeError(f"llama.cpp has no ready-made build for this computer ({platform.system()} {platform.machine()})")
+        raise RuntimeError(f"llama.cpp has no ready-made build for this computer ({platform.system()} "
+                           f"{platform.machine()}); its release has {', '.join(sorted(assets))[:600]}")
     dest = home / "llama.cpp"
-    tmp = home / "llama.cpp.zip"
+    tmp = home / ("llama.cpp.zip" if pick.endswith(".zip") else "llama.cpp.tar.gz")
     home.mkdir(parents=True, exist_ok=True)
     progress(f"Downloading llama.cpp {rel.get('tag_name', '')} ({pick})…")
     with urllib.request.urlopen(urllib.request.Request(assets[pick], headers={"User-Agent": "omnicompute"}), timeout=120) as r, \
@@ -87,8 +89,14 @@ def install(home: Path, progress=lambda text: None, cpu_only: bool = False) -> s
         shutil.copyfileobj(r, f, 1 << 20)
     if dest.exists():
         shutil.rmtree(dest, ignore_errors=True)
-    with zipfile.ZipFile(tmp) as z:
-        z.extractall(dest)
+    if pick.endswith(".zip"):
+        with zipfile.ZipFile(tmp) as z:
+            z.extractall(dest)
+    else:
+        import tarfile
+
+        with tarfile.open(tmp) as t:
+            t.extractall(dest, filter="data") if hasattr(tarfile, "data_filter") else t.extractall(dest)
     tmp.unlink(missing_ok=True)
     (dest / "version.txt").write_text(f"{rel.get('tag_name', '')} {pick}\n", encoding="utf-8")
     exe = find_server(home)
