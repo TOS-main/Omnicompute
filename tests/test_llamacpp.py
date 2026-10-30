@@ -119,3 +119,54 @@ async def test_real_llama_cpp_download_and_run(tmp_path, monkeypatch):
             out += piece
     eng.stop()
     assert out.strip() and timings.get("predicted_per_second"), (out, timings)
+
+
+@posix_only
+async def test_model_downloads_and_runs_on_another_device(tmp_path, fake_server, monkeypatch):
+    """The main computer has no room: the laptop loads the GGUF and runs it; chats go through the hub."""
+    import asyncio
+    import tempfile
+
+    import aiohttp
+
+    from omnicompute.hub import Hub
+    from omnicompute.limits import LimitStore
+    from omnicompute.node import MeshNode
+    from omnicompute.worker import Worker
+
+    monkeypatch.setenv("OMNICOMPUTE_HOME", str(tmp_path / "laptop-home"))
+    path = _gguf(tmp_path)
+    key = "remote-model-key"
+    hub = Hub(key, "127.0.0.1", 0, None, models_dir=str(tmp_path / "hub-models"))
+    await hub.start()
+    url = f"http://127.0.0.1:{hub.port}"
+    laptop = MeshNode("laptop", key, url, {"role": "worker", "kind": "native", "score": 1, "mem_mb": 1024})
+    Worker(LimitStore(Path(tempfile.mkdtemp()) / "l.json", {"cpu": 100})).attach(laptop)
+    helper = MeshNode("helper", hub.contribute_key, url, {"role": "worker", "kind": "native", "score": 1, "mem_mb": 1024})
+    Worker(LimitStore(Path(tempfile.mkdtemp()) / "l.json", {"cpu": 100})).attach(helper)
+    await laptop.start()
+    await helper.start()
+    try:
+        async with aiohttp.ClientSession(headers={"X-Mesh-Key": key}) as s:
+            async with s.post(url + "/api/model", json={"repo": f"gguf:{path}", "device": "helper"}) as r:
+                assert r.status == 400  # never on a helper's device: it would see the chats
+            async with s.post(url + "/api/model", json={"repo": f"gguf:{path}", "device": "laptop"}) as r:
+                assert r.status == 200, await r.text()
+            for _ in range(200):
+                async with s.get(url + "/api/model") as r:
+                    m = await r.json()
+                if m["model"] and m["engine"].get("state") == "ready":
+                    break
+                await asyncio.sleep(0.1)
+            assert m["engine"]["device"] == "laptop" and m["download"]["state"] == "ready", m
+            events = [ev async for ev in hub.orchestrator.generate([{"role": "user", "content": "2+2?"}], 50, chat=True)]
+            assert events[-1]["type"] == "done", events
+            assert events[-1]["text"] == "2 + 2 = 4" and events[-1]["thinking"] == "two plus two is four"
+            assert next(e for e in events if e["type"] == "plan")["plan"][0][0] == "laptop"
+            assert not list((tmp_path / "hub-models").rglob("*.gguf"))  # nothing stored on the main computer
+            async with s.post(url + "/api/model/unload") as r:
+                assert r.status == 200
+    finally:
+        await laptop.close()
+        await helper.close()
+        await hub.close()

@@ -79,7 +79,8 @@ def worker_info(mem_fraction: float = 0.5, gpu=None) -> dict:
     return info
 
 
-CONTROL_OPS = {"load", "unload", "set_limits", "drop", "preconnect", "info", "credit", "live", "uninstall"}
+CONTROL_OPS = {"load", "unload", "engine_load", "engine_status", "engine_generate", "engine_stop",
+               "engine_unload", "set_limits", "drop", "preconnect", "info", "credit", "live", "uninstall"}
 HYBRID_MIN = 0.15  # below this share, splitting a matrix between CPU and GPU costs more than it saves
 
 
@@ -96,6 +97,10 @@ class Worker:
         self._busy = asyncio.Lock()  # load and forward never overlap
         self.on_uninstall = None  # set by the CLI: what "Remove device" on the main computer does
         self._reported = None
+        self.engine = None  # llamacpp.Engine running a whole model here (see _engine_*)
+        self.engine_cfg: dict | None = None
+        self.loader = None
+        self._engine_stop: set[str] = set()
 
     def attach(self, node) -> "Worker":
         self.node = node
@@ -172,6 +177,57 @@ class Worker:
                 log.debug("could not report limits: %s", e)
             await asyncio.sleep(5)
 
+    # ---------- the whole model on this device, on llama.cpp: for a main computer without the
+    # disk space, this device downloads the GGUF file and runs it; the main computer only relays
+    # the chat. Only the mesh owner's own devices get this (the hub never asks helpers).
+
+    def _engine_close(self) -> None:
+        if self.engine is not None:
+            self.engine.stop()
+        self.engine, self.engine_cfg = None, None
+
+    async def _engine_load(self, h: dict):
+        from .hf import Loader
+        from .llamacpp import Engine
+
+        self._engine_close()
+        if self.loader is None:
+            self.loader = Loader(home_dir() / "models", None)
+        loop = asyncio.get_running_loop()
+
+        async def ready(source):
+            path = getattr(source, "path", None)
+            if path is None or str(path).lower()[-5:] != ".gguf":
+                raise RuntimeError("only GGUF models can run on another device (use a GGUF repo, e.g. org/name:Q4_K_M)")
+            self.engine = Engine(home_dir(), path, source.cfg)
+            self.engine.start(h.get("settings") or {}, self.limits.limits if self.limits else None)
+            self.engine_cfg = source.cfg
+
+        def on_ready(source):
+            asyncio.run_coroutine_threadsafe(ready(source), loop).result(60)
+
+        try:
+            self.loader.start(str(h["repo"]), h.get("token"), on_ready)
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)}, b""
+        return {"ok": True}, b""
+
+    async def _engine_generate(self, peer: str, h: dict) -> None:
+        req = h["req"]
+        try:
+            if self.engine is None or not await self.engine.ready():
+                raise RuntimeError(self.engine.error if self.engine else "no model loaded on this device")
+            async for kind, piece in self.engine.generate(h["prompt"], int(h["max_new"]), float(h["temperature"]),
+                                                          bool(h["chat"])):
+                if req in self._engine_stop:
+                    break
+                await self.node.notify(peer, {"op": "engine_event", "req": req, "what": kind, "piece": piece})
+            await self.node.notify(peer, {"op": "engine_event", "req": req, "what": "end"})
+        except Exception as e:  # noqa: BLE001 - shown in the chat
+            await self.node.notify(peer, {"op": "engine_event", "req": req, "what": "end", "error": str(e)})
+        finally:
+            self._engine_stop.discard(req)
+
     async def handle(self, peer_id: str, header: dict, payload: bytes):
         op = header.get("op")
         if op in CONTROL_OPS and peer_id != "hub":
@@ -179,6 +235,21 @@ class Worker:
         if op == "load":
             async with self._busy:
                 return await self._load(header, payload)
+        if op == "engine_load":
+            return await self._engine_load(header)
+        if op == "engine_status":
+            d = self.loader.current if self.loader else None
+            return {"download": d.as_dict() if d else None, "engine": self.engine.info() if self.engine else None,
+                    "cfg": self.engine_cfg}, b""
+        if op == "engine_generate":
+            asyncio.ensure_future(self._engine_generate(peer_id, header))
+            return None
+        if op == "engine_stop":
+            self._engine_stop.add(header["req"])
+            return None
+        if op == "engine_unload":
+            self._engine_close()
+            return None
         if op == "unload":  # the main computer unloaded or switched models: free the memory now
             async with self._busy:
                 self.shards.clear()

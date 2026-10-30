@@ -53,6 +53,7 @@ async function refreshStatus() {
   $("pill").textContent = `${s.model ? s.model.name.split("/").pop() : "no model"} · ${n} device${n === 1 ? "" : "s"}${s.busy ? " · generating" : ""}`;
   $("devcount").textContent = n || "";
   renderDevices();
+  drawTargets(s.devices);
   applyModel(s.model);
   state.ckey = s.contribute_key;
   drawShareLinks(s);
@@ -668,7 +669,7 @@ function engineLine(g) {
   if (g.state === "error") return el("p", { class: "bad small" }, `The fast engine didn't start: ${g.error}. Using the mesh instead.`);
   if (g.state !== "ready") return el("p", { class: "muted small" }, g.note || "Starting llama.cpp…");
   const gl = g.gpu_layers === "999" ? "all layers on the GPU" : g.gpu_layers === "0" ? "CPU only" : `${g.gpu_layers} layers on the GPU`;
-  return el("p", { class: "small" }, el("span", { class: "badge on" }, "llama.cpp"), ` running on the main computer · ${gl} · ${g.threads} threads · context ${g.context}`);
+  return el("p", { class: "small" }, el("span", { class: "badge on" }, "llama.cpp"), ` running on ${g.device || "the main computer"} · ${gl} · ${g.threads} threads · context ${g.context}`);
 }
 
 async function unloadModel() {
@@ -696,8 +697,18 @@ $("eng-save").onclick = async () => {
 };
 loadEngine();
 
+// your own computers and app devices that can download and run a whole model (llama.cpp)
+function drawTargets(devices) {
+  const sel = $("target"), cur = sel.value;
+  const own = devices.filter((d) => d.kind === "native" && !d.contributor && !d.is_hub_machine && d.role === "worker");
+  fill(sel, el("option", { value: "" }, "The main computer"), own.map((d) => el("option", { value: d.node_id },
+    `${d.node_id}${d.mem_mb ? ` (${Math.round(d.mem_mb / 1024)} GB offered)` : ""}`)));
+  sel.value = own.some((d) => d.node_id === cur) ? cur : "";
+}
+
 async function loadRepo(repo) {
-  const r = await api("/api/model", { method: "POST", body: JSON.stringify({ repo, token: $("hftoken").value.trim() }) });
+  const device = $("target").value;
+  const r = await api("/api/model", { method: "POST", body: JSON.stringify({ repo, token: $("hftoken").value.trim(), device }) });
   if (!r.ok) { $("dl").hidden = false; $("dltext").className = "bad"; $("dltext").textContent = await r.text(); return; }
   refreshModelInfo();
 }

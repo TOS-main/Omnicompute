@@ -63,7 +63,12 @@ class Orchestrator:
             self.engine.stop()
         self.source, self.cfg = source, source.cfg
         self.model_id = f"{self.cfg.get('name', 'model')}-{os.urandom(3).hex()}"
-        self.tokenizer = load_tokenizer(source)
+        if getattr(source, "remote_node", None):  # the model lives on another device (llamacpp.RemoteSource)
+            from .llamacpp import RoughTokenizer
+
+            self.tokenizer = RoughTokenizer()
+        else:
+            self.tokenizer = load_tokenizer(source)
         self.half = getattr(source, "dtype", np.float32) == np.float16
         self.plan: list[tuple[str, int, int]] = []
         self.loaded = {}
@@ -71,6 +76,10 @@ class Orchestrator:
 
     def _make_engine(self):
         """llama.cpp for a GGUF file, unless the mesh is chosen (see llamacpp.py)."""
+        if getattr(self.source, "remote_node", None):
+            from .llamacpp import RemoteEngine
+
+            return RemoteEngine(self.endpoint, self.source.remote_node, self.source.repo, self.cfg)
         path = getattr(self.source, "path", None)
         if (self.home is None or path is None or Path(path).suffix.lower() != ".gguf"
                 or os.environ.get("OMNICOMPUTE_LLAMA") == "off" or self.engine_settings.get("engine") == "mesh"):
@@ -82,6 +91,8 @@ class Orchestrator:
     def set_engine(self, settings: dict) -> None:
         """New engine settings (Models tab): restart the engine with them, or switch engines."""
         self.engine_settings.update(settings)
+        if getattr(self.source, "remote_node", None):
+            return  # set on the device that runs it
         if self.engine is not None and self.engine_settings.get("engine") == "mesh":
             self.engine.stop()
             self.engine = None
@@ -122,6 +133,10 @@ class Orchestrator:
             self.engine = None
 
     async def handle(self, peer_id: str, header: dict, payload: bytes):
+        if header.get("op") == "engine_event":
+            if self.engine is not None and hasattr(self.engine, "event"):
+                self.engine.event(header)
+            return None
         fut = self._waiters.get(header.get("req"))
         if fut is not None and not fut.done():
             if header.get("op") == "result":
@@ -200,6 +215,9 @@ class Orchestrator:
                     yield ev
                 if fast["ok"]:
                     return
+                if getattr(self.source, "remote_node", None):
+                    yield {"type": "error", "error": f"the model on {self.source.remote_node} isn't running: {self.engine.error}"}
+                    return
             rng = np.random.default_rng(seed)
             ctx = max(16, min(int(context or self.cfg.get("ctx_default", self.cfg["n_ctx"])), self.cfg["n_ctx"]))
             ids = self.tokenizer.encode(prompt, chat=chat)[-(ctx - 1):] or [0]
@@ -272,6 +290,7 @@ class Orchestrator:
         if context:
             settings["context"] = max(int(settings.get("context") or 0), int(context))
         node, info = self._main_machine()
+        node = getattr(eng, "node", node)  # on another device
         eng.start(settings, (info or {}).get("limits"))
         while eng._ready is not None and not eng._ready.done():
             yield {"type": "status", "text": eng.note or "Starting the fast engine…"}

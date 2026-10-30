@@ -45,6 +45,10 @@ def physical_cores() -> int:
 
 def asset_patterns() -> list[str]:
     """Release file name parts to look for on this computer, best first."""
+    import sys
+
+    if hasattr(sys, "getandroidapilevel"):  # Linux builds need glibc, which Android doesn't have
+        return []
     system, machine = platform.system(), platform.machine().lower()
     arm = machine in ("arm64", "aarch64")
     if system == "Windows":
@@ -204,6 +208,7 @@ class Engine:
             return ""
 
     def _popen(self, cmd: list[str]) -> subprocess.Popen:
+        self.home.mkdir(parents=True, exist_ok=True)
         out = open(self.log_file, "ab")
         flags = 0x08000000 if os.name == "nt" else 0  # no console window
         return subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=flags)
@@ -301,3 +306,97 @@ def split_thinking(text: str) -> tuple[str, str]:
     if m:
         return m.group(1).strip(), m.group(2).lstrip()
     return "", text
+
+
+class RemoteSource:
+    """A model that lives on another of the owner's devices (it downloaded the file and runs it
+    on llama.cpp there). The main computer only has its settings."""
+
+    def __init__(self, cfg: dict, node: str, repo: str):
+        self.cfg, self.remote_node, self.repo = cfg, node, repo
+
+
+class RoughTokenizer:
+    """Stands in for the tokenizer of a model on another device: only counts, roughly."""
+
+    eos_ids: set = set()
+    has_chat_template = True
+
+    def encode(self, prompt, chat: bool = False) -> list[int]:
+        text = prompt if isinstance(prompt, str) else " ".join(str(m.get("content", "")) for m in prompt)
+        return [0] * max(1, len(text) // 4)
+
+    def decode(self, ids) -> str:
+        return ""
+
+
+class RemoteEngine:
+    """Engine's interface for llama.cpp running on another device, through the mesh."""
+
+    def __init__(self, endpoint, node: str, repo: str, cfg: dict):
+        self.endpoint, self.node, self.repo, self.cfg = endpoint, node, repo, cfg
+        self.state, self.error, self.note = "loading", None, f"Loading on {node}…"
+        self.queues: dict[str, asyncio.Queue] = {}
+        self._info: dict = {}
+        self._ready: asyncio.Task | None = None
+
+    def start(self, settings: dict, limits: dict | None = None, gpu_share: float | None = None) -> None:
+        if self._ready is None or (self._ready.done() and self.state == "error"):
+            self._ready = asyncio.ensure_future(self._poll())
+
+    async def _poll(self) -> None:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1800:
+            try:
+                h, _ = await self.endpoint.request(self.node, {"op": "engine_status"}, timeout=15)
+            except Exception as e:  # noqa: BLE001
+                self.state, self.error = "error", f"{self.node} doesn't answer: {e}"
+                return
+            g = h.get("engine") or {}
+            self._info = g
+            if g.get("state") in ("ready", "error"):
+                self.state, self.error = g["state"], g.get("error")
+                self.note = ""
+                return
+            self.note = f"{self.node}: {g.get('note') or 'loading the model…'}"
+            await asyncio.sleep(1)
+        self.state, self.error = "error", f"{self.node} took too long to load the model"
+
+    async def ready(self) -> bool:
+        if self._ready:
+            await asyncio.shield(self._ready)
+        return self.state == "ready"
+
+    def stop(self) -> None:
+        asyncio.ensure_future(self.endpoint.notify(self.node, {"op": "engine_unload"}))
+        self.state = "stopped"
+
+    def info(self) -> dict:
+        return {"state": self.state, "error": self.error, "note": self.note, "device": self.node,
+                "gpu_layers": self._info.get("gpu_layers"), "threads": self._info.get("threads"),
+                "context": self._info.get("context")}
+
+    def event(self, header: dict) -> None:
+        q = self.queues.get(header.get("req"))
+        if q is not None:
+            q.put_nowait(header)
+
+    async def generate(self, prompt, max_new: int, temperature: float, chat: bool):
+        req = os.urandom(8).hex()
+        q = self.queues[req] = asyncio.Queue()
+        try:
+            await self.endpoint.notify(self.node, {"op": "engine_generate", "req": req, "prompt": prompt,
+                                                   "max_new": max_new, "temperature": temperature, "chat": chat})
+            while True:
+                try:
+                    ev = await asyncio.wait_for(q.get(), 900)
+                except asyncio.TimeoutError:
+                    raise RuntimeError(f"{self.node} stopped answering")
+                if ev["what"] == "end":
+                    if ev.get("error"):
+                        raise RuntimeError(f"{self.node}: {ev['error']}")
+                    return
+                yield ev["what"], ev["piece"]
+        finally:
+            self.queues.pop(req, None)
+            asyncio.ensure_future(self.endpoint.notify(self.node, {"op": "engine_stop", "req": req}))

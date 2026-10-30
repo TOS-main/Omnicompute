@@ -115,6 +115,7 @@ class Hub:
         self.chat_id = os.urandom(6).hex()
         self._runner = None
         self._udp = None
+        self.remote_load: dict | None = None  # a model loading on another device (see _load_on_device)
 
     # ---------- lifecycle ----------
 
@@ -674,7 +675,7 @@ class Hub:
             "model": o.cfg if o else None,
             "chat_template": bool(o and o.tokenizer.has_chat_template),
             "engine": (o.engine.info() | {"name": "llama.cpp"}) if o and o.engine else {"name": "mesh"},
-            "download": d.as_dict() if d else None,
+            "download": dict(self.remote_load) if self.remote_load else d.as_dict() if d else None,
         })
 
     async def _load_model(self, request: web.Request) -> web.Response:
@@ -683,6 +684,12 @@ class Hub:
             raise web.HTTPUnauthorized(text="wrong mesh key")
         body = await request.json()
         repo = str(body.get("repo", "")).strip().removeprefix("https://huggingface.co/").strip("/")
+        device = str(body.get("device") or "")
+        client = self.clients.get(device) if device else None
+        if client is not None and not client.info.get("hub_machine"):
+            return await self._load_on_device(client, repo, body.get("token") or self.loader.token)
+        if device and client is None:
+            raise web.HTTPBadRequest(text=f"{device} isn't connected")
         if repo.startswith("gguf:") or repo.lower().endswith(".gguf"):  # a GGUF file on this computer
             path = Path(repo.removeprefix("gguf:").strip('"')).expanduser()
             if path.suffix.lower() != ".gguf" or not path.is_file():
@@ -699,9 +706,53 @@ class Hub:
 
         try:
             d = self.loader.start(repo, body.get("token") or None, ready)
+            self.remote_load = None
         except RuntimeError as e:
             raise web.HTTPConflict(text=str(e))
         return web.json_response(d.as_dict())
+
+    async def _load_on_device(self, client, repo: str, token: str | None) -> web.Response:
+        """Download and run a GGUF model on another of the owner's computers (llama.cpp there),
+        for a main computer without the disk space or memory. Never on a helper's device: it
+        would see every chat."""
+        if client.contributor or not client.native:
+            raise web.HTTPBadRequest(text="a model can only run on your own computers, not on helpers' devices or browsers")
+        if repo.lower().endswith(".gguf") and not repo.startswith("gguf:"):
+            repo = "gguf:" + repo  # a file on that device
+        if not repo.startswith("gguf:") and ":" not in repo and "gguf" not in repo.lower():
+            raise web.HTTPBadRequest(text="another device runs GGUF models: use a GGUF repo (e.g. unsloth/gemma-3-4b-it-GGUF) "
+                                          "or org/name:Q4_K_M, or the path of a .gguf file on that device")
+        node = client.node_id
+        h, _ = await self.endpoint.request(node, {"op": "engine_load", "repo": repo, "token": token,
+                                                  "settings": self._engine_settings()}, timeout=30)
+        if not h.get("ok"):
+            raise web.HTTPConflict(text=h.get("error", "that device can't load a model right now"))
+        self.remote_load = {"repo": repo, "state": "starting", "total": 0, "done": 0, "file": None, "error": None, "device": node}
+        asyncio.ensure_future(self._follow_device_load(node, repo))
+        return web.json_response(self.remote_load)
+
+    async def _follow_device_load(self, node: str, repo: str) -> None:
+        from .llamacpp import RemoteSource
+
+        d = self.remote_load
+        while d is self.remote_load:
+            try:
+                h, _ = await self.endpoint.request(node, {"op": "engine_status"}, timeout=15)
+            except Exception as e:  # noqa: BLE001
+                d.update(state="error", error=f"{node} stopped answering: {e}")
+                return
+            got = h.get("download") or {}
+            d.update({k: got.get(k) for k in ("total", "done", "file")})
+            if got.get("state") == "error":
+                d.update(state="error", error=got.get("error"))
+                return
+            if h.get("cfg"):
+                d["state"] = "loading"
+                await self._switch(RemoteSource(h["cfg"], node, repo))
+                d["state"] = "ready"
+                return
+            d["state"] = got.get("state") or "starting"
+            await asyncio.sleep(1)
 
     async def _switch(self, source) -> None:
         if self.orchestrator is None:
