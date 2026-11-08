@@ -119,6 +119,72 @@ def install(home: Path, progress=lambda text: None, cpu_only: bool = False) -> s
     return exe
 
 
+# llama-server ends with the program that started it, so closing the host's window (or a crash)
+# never leaves a model filling memory in the background
+
+def _die_with_parent() -> None:  # Linux: the kernel ends it when its parent dies
+    try:
+        import ctypes
+        import signal
+
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+    except Exception:  # noqa: BLE001 - not Linux; the pid file below catches it next start
+        pass
+
+
+_job = None
+
+
+def _kill_on_close(proc: subprocess.Popen) -> None:
+    """Windows: put it in a job that ends its processes when this process exits."""
+    global _job
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        if _job is None:
+            _job = k32.CreateJobObjectW(None, None)
+
+            class Limits(ctypes.Structure):
+                _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                            ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                            ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                            ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                            ("SchedulingClass", wintypes.DWORD)]
+
+            class Extended(ctypes.Structure):
+                _fields_ = [("BasicLimitInformation", Limits), ("IoInfo", ctypes.c_uint64 * 6),
+                            ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                            ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+            info = Extended()
+            info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            k32.SetInformationJobObject(_job, 9, ctypes.byref(info), ctypes.sizeof(info))
+        k32.AssignProcessToJobObject(_job, wintypes.HANDLE(int(proc._handle)))
+    except Exception as e:  # noqa: BLE001
+        log.debug("couldn't tie llama-server to this process: %s", e)
+
+
+def _end_previous(home: Path) -> None:
+    """A llama-server an earlier run left behind (it was killed before it could stop it)."""
+    pid_file = home / "llama-server.pid"
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, creationflags=0x08000000)
+        else:
+            out = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout
+            if "llama-server" in out:
+                os.kill(pid, 15)
+    except OSError:
+        pass
+    pid_file.unlink(missing_ok=True)
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -209,9 +275,15 @@ class Engine:
 
     def _popen(self, cmd: list[str]) -> subprocess.Popen:
         self.home.mkdir(parents=True, exist_ok=True)
+        _end_previous(self.home)
         out = open(self.log_file, "ab")
         flags = 0x08000000 if os.name == "nt" else 0  # no console window
-        return subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=flags)
+        kw = {} if os.name == "nt" else {"preexec_fn": _die_with_parent}
+        proc = subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=flags, **kw)
+        if os.name == "nt":
+            _kill_on_close(proc)
+        (self.home / "llama-server.pid").write_text(str(proc.pid), encoding="utf-8")
+        return proc
 
     async def _wait_healthy(self, timeout: float = 900) -> None:
         import aiohttp
@@ -253,6 +325,7 @@ class Engine:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
         self.proc = None
+        (self.home / "llama-server.pid").unlink(missing_ok=True)
         self.state = "stopped"
 
     def info(self) -> dict:

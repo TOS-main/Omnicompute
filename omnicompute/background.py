@@ -63,6 +63,8 @@ def stop(home: Path, quiet: bool = False, keep_autostart: bool = False) -> bool:
     stopped = False
     for pid_file in dict.fromkeys([home / "contribute.pid", LEGACY_HOME / "contribute.pid"]):  # also EdgeMesh's
         stopped = _stop_pid(pid_file) or stopped
+    # one started at login has no pid file: find it (and its llama.cpp engine) by its command line
+    stopped = _stop_matching() or stopped
     if not keep_autostart:
         remove_autostart()
     if not quiet:
@@ -84,6 +86,41 @@ def _stop_pid(pid_file: Path) -> bool:
             pass
         pid_file.unlink(missing_ok=True)
     return stopped
+
+
+def _stop_matching() -> bool:
+    """End background contributors ("-m omnicompute join … --log") and llama-server processes
+    Omnicompute started, other than this process."""
+    me = os.getpid()
+    if platform.system() == "Windows":
+        ps = ("$me=" + str(me) + "; $n=0; Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $me -and ("
+              "($_.CommandLine -match 'omnicompute' -and $_.CommandLine -match ' join ' -and $_.CommandLine -match '--log') -or "
+              "($_.Name -eq 'llama-server.exe' -and $_.ExecutablePath -match '(?i)omnicompute|edgemesh')) } | "
+              "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $n++ }; $n")
+        try:
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
+                                 timeout=30, creationflags=0x08000000).stdout.strip()
+            return out.isdigit() and int(out) > 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+    found = False
+    try:
+        out = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    for line in out.splitlines():
+        pid, _, args = line.strip().partition(" ")
+        if not pid.isdigit() or int(pid) == me:
+            continue
+        ours = ("-m omnicompute join " in args and "--log" in args) or \
+            ("llama-server" in args.split(" ")[0] and (".omnicompute" in args or ".edgemesh" in args))
+        if ours:
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+                found = True
+            except OSError:
+                pass
+    return found
 
 
 def _quote_windows(cmd: list[str]) -> str:
